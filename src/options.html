@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width">
+<title>网页视频下载器设置</title><link rel="stylesheet" href="style.css">
+<body class="download">
+  <main>
+    <h1>下载设置</h1>
+    <section>
+      <h2>下载文件位置</h2>
+      <p>跟随浏览器默认下载位置。可打开浏览器下载设置查看当前完整路径。</p>
+      <button id="browser-download-settings" type="button">查看浏览器当前下载地址</button>
+      <p id="last-download-location" hidden>最近一次实际保存位置 <code id="last-download-path"></code></p>
+    </section>
+    <section aria-labelledby="proxy-heading">
+      <h2 id="proxy-heading">网络与代理</h2>
+      <p><strong>自动跟随浏览器和系统代理</strong></p>
+      <p>Surge、Clash 或 V2Ray 已通过系统代理或 TUN 接管网络时，下载请求沿用它的直连和代理规则。系统和浏览器都未启用代理且没有 TUN 时，下载走直连。</p>
+      <button id="browser-proxy-settings" type="button">打开浏览器代理设置</button>
+    </section>
+    <form id="settings">
+      <h2>默认下载选项</h2>
+      <p><label>画质上限
+        <select id="max-height" disabled>
+          <option value="0">最高可用画质</option>
+          <option value="1080">最高 1080p</option>
+          <option value="720">最高 720p</option>
+          <option value="480">最高 480p</option>
+        </select>
+      </label></p>
+      <p><label>单个文件大小上限
+        <input id="max-mib" type="number" min="0" step="1" value="0" required disabled aria-describedby="size-help"> MiB
+      </label></p>
+      <p id="size-help">填 0 表示不限大小。</p>
+      <button id="save-settings" type="submit" disabled>保存下载选项</button>
+    </form>
+    <p id="settings-status" role="status" aria-live="polite"></p>
+  </main>
+  <script type="module" src="options.js"></script>
+</body></html>

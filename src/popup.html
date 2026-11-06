@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width">
+<title>网页视频下载器</title><link rel="stylesheet" href="style.css">
+<body class="popup">
+  <header>
+    <h1>网页视频下载器</h1>
+    <div class="toolbar-actions">
+      <button id="refresh">重新扫描</button>
+      <button id="settings">设置</button>
+    </div>
+  </header>
+  <section id="download-job" aria-label="下载状态" hidden>
+    <div id="job-title" class="media-title"></div>
+    <p id="job-message" role="status"></p>
+    <progress id="job-progress" aria-label="下载进度" hidden></progress>
+    <button id="cancel-job" hidden>取消下载</button>
+  </section>
+  <p id="state" role="status">正在读取当前网页…</p>
+  <section id="media" aria-label="媒体资源"></section>
+  <script type="module" src="popup.js"></script>
+</body></html>

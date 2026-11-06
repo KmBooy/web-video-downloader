@@ -1,0 +1,20 @@
+{
+  "name": "web-video-downloader",
+  "version": "0.2.13",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "googlevideo": "5.0.1",
+    "m3u8-parser": "7.2.0",
+    "mediabunny": "1.65.2",
+    "mpd-parser": "1.4.1"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2",
+    "playwright": "1.59.1"
+  }
+}

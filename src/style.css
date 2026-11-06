@@ -1,0 +1,28 @@
+:root { color-scheme: light dark; font: 14px/1.55 system-ui, sans-serif; --muted: color-mix(in srgb, CanvasText 55%, Canvas); }
+body { margin: 0; background: Canvas; color: CanvasText; }
+.popup { width: 370px; padding: 14px; box-sizing: border-box; max-height: 560px; overflow: auto; }
+header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+h1 { font-size: 18px; line-height: 1.35; margin: 0; overflow-wrap: anywhere; }
+p { color: var(--muted); overflow-wrap: anywhere; }
+button, select { font: inherit; padding: 6px 10px; border: 1px solid var(--muted); border-radius: 6px; background: ButtonFace; color: ButtonText; }
+button:not(:disabled) { cursor: pointer; }
+button:focus-visible, select:focus-visible { outline: 2px solid Highlight; outline-offset: 2px; }
+button:disabled { opacity: .55; }
+section button { margin: 4px 4px 4px 0; }
+.media { display: block; width: 100%; text-align: left; overflow-wrap: anywhere; }
+.download main { max-width: 660px; margin: 60px auto; padding: 0 20px; }
+.actions { display: flex; gap: 8px; margin-top: 16px; }
+progress { width: 100%; margin-top: 14px; }
+
+.media-title, .media-details { display: block; }
+.media-title { font-weight: 600; }
+.media-details { color: var(--muted); font-size: 12px; }
+
+.toolbar-actions { display: flex; gap: 6px; flex-shrink: 0; }
+#download-job { margin-top: 12px; border-top: 1px solid var(--muted); padding-top: 10px; }
+#job-title { font-weight: 600; overflow-wrap: anywhere; }
+#job-message { margin: 4px 0; }
+.download section, .download fieldset { margin: 18px 0; }
+.download input, .download select { font: inherit; }
+
+#last-download-location code { display: block; overflow-wrap: anywhere; }
