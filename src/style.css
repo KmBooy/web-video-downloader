@@ -19,9 +19,9 @@ progress { width: 100%; margin-top: 14px; }
 .media-details { color: var(--muted); font-size: 12px; }
 
 .toolbar-actions { display: flex; gap: 6px; flex-shrink: 0; }
-#download-job { margin-top: 12px; border-top: 1px solid var(--muted); padding-top: 10px; }
-#job-title { font-weight: 600; overflow-wrap: anywhere; }
-#job-message { margin: 4px 0; }
+#download-jobs { margin-top: 12px; max-height: 230px; overflow: auto; }
+.job { border-top: 1px solid var(--muted); padding: 8px 0; overflow-wrap: anywhere; }
+.job-message { margin: 4px 0; }
 .download section, .download fieldset { margin: 18px 0; }
 .download input, .download select { font: inherit; }
 

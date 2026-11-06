@@ -9,7 +9,8 @@ import { douyinDownload } from './platforms/douyin.js';
 import { stageYouTube } from './platforms/youtube-download.js';
 
 const MIB = 1024 * 1024;
-let active;
+const active = new Map();
+let staleCleanup;
 
 function heightOf(track) {
   return track.width && track.height ? Math.min(track.width, track.height) : track.height;
@@ -38,7 +39,8 @@ async function choose(candidate, maxHeight, signal) {
 
   const choice = selectQuality(choices, maxHeight);
   if (!choice) throw new Error(maxHeight ? '没有符合 ' + maxHeight + 'p 上限的可用画质。' : '未取得可下载的画质。');
-  if (choice.hls) {
+  // A media playlist already passed the checks above and supplied a duration.
+  if (choice.hls && choice.duration == null) {
     const children = [];
     for (const spec of [choice.video, choice.audio].filter(Boolean)) {
       const child = await manifestText(spec.url, signal);
@@ -63,7 +65,8 @@ async function checkDirect(url, signal, maxHeight) {
   try {
     const video = await input.getPrimaryVideoTrack();
     if (!video) throw new Error('这个地址缺少视频轨，无法作为完整文件保存。');
-    if (!await input.getPrimaryAudioTrack()) {
+    const hasAudio = Boolean(await input.getPrimaryAudioTrack());
+    if (!hasAudio) {
       const pathname = new URL(url).pathname;
       if (/\/media-(?:audio|video)-[^/]+\/?$/i.test(pathname)
           || !await new EncodedPacketSink(video).getFirstPacket()) {
@@ -74,6 +77,7 @@ async function checkDirect(url, signal, maxHeight) {
     if (maxHeight && Math.min(await video.getDisplayWidth(), await video.getDisplayHeight()) > maxHeight) {
       throw new Error('原文件画质超出 ' + maxHeight + 'p 上限。');
     }
+    return hasAudio;
   } catch (error) {
     throw fetchFailure ?? error;
   } finally {
@@ -126,8 +130,8 @@ async function useSiteReferer(id, urls) {
 async function selectDouyinSource(direct, id, signal, maxHeight) {
   const urls = [direct.url, ...(direct.mirrors ?? [])].filter(douyinDownload.accepts);
   const verify = async url => {
-    await checkDirect(url, signal, maxHeight);
-    await checkCompleteResponse(url, signal);
+    // Silent files already pass this check inside checkDirect.
+    if (await checkDirect(url, signal, maxHeight)) await checkCompleteResponse(url, signal);
   };
   let needsReferer = false;
   let failure;
@@ -237,12 +241,12 @@ async function writeVideo(job, signal) {
   }
 }
 
-async function cleanStaleDownloads(jobId) {
+async function cleanStaleDownloads() {
   const root = await navigator.storage.getDirectory();
   const jobDirectory = /^(?:browser-download|media)-([\da-f]{8}-[\da-f]{4}-4[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12})$/i;
   for await (const [name, entry] of root.entries()) {
     const match = name.match(jobDirectory);
-    if (entry.kind === 'directory' && match && match[1] !== jobId) {
+    if (entry.kind === 'directory' && match) {
       await root.removeEntry(name, { recursive: true }).catch(() => {});
     }
   }
@@ -251,8 +255,8 @@ async function cleanStaleDownloads(jobId) {
 async function run(job, controller) {
   let result;
   try {
-    // run-download is accepted only when the offscreen document has no active job.
-    await cleanStaleDownloads(job.id).catch(() => {});
+    // All jobs wait for the same cleanup before any of them creates a directory.
+    await (staleCleanup ??= cleanStaleDownloads().catch(() => {}));
     controller.signal.throwIfAborted();
     const file = await writeVideo(job, controller.signal);
     result = { state: 'saved', message: '已保存 ' + file.filename, ...file };
@@ -262,20 +266,20 @@ async function run(job, controller) {
         ? '浏览器用于合并和暂存的空间不足。' : error.message || '下载失败。' };
   }
   await chrome.runtime.sendMessage({ type: 'download-finished', id: job.id, result }).catch(() => {});
-  active = undefined;
+  active.delete(job.id);
 }
 
 chrome.runtime.onMessage.addListener((message, sender, reply) => {
   if (sender.id !== chrome.runtime.id || sender.tab) return;
-  if (message.type === 'run-download' && !active) {
+  if (message.type === 'run-download' && !active.has(message.job.id)) {
     const controller = new AbortController();
-    active = { id: message.job.id, controller };
+    active.set(message.job.id, controller);
     reply({ accepted: true });
     void run(message.job, controller);
-  } else if (message.type === 'cancel-download' && active?.id === message.id) {
-    active.controller.abort();
+  } else if (message.type === 'cancel-download' && active.has(message.id)) {
+    active.get(message.id).abort();
     reply({ accepted: true });
-  } else if (message.type === 'probe-download') {
-    reply({ active: active?.id === message.id });
+  } else if (message.type === 'probe-downloads') {
+    reply({ ids: [...active.keys()] });
   }
 });

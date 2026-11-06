@@ -1,15 +1,16 @@
-import { classify, cleanTitle, combineCandidates, dispositionTitle, headerValue, mediaUrl, pageKey, titleCandidates } from './media.js';
+import { captureCandidate, classify, cleanTitle, combineCandidates, dispositionTitle, headerValue, mediaUrl, pageKey, titleCandidates } from './media.js';
 import { scanPage } from './scan-page.js';
 import { bilibiliDownload } from './platforms/bilibili.js';
 import { douyinDownload } from './platforms/douyin.js';
 import { carryXEntries, xCandidates } from './platforms/x.js';
-import { matchesYouTubePlayback, playbackKey, readYouTubePlayback } from './platforms/youtube-session.js';
+import { matchesYouTubePlayback, playbackKey, readYouTubePlayback, rememberYouTubePlayback } from './platforms/youtube-session.js';
 
 const tabKey = id => 'tab:' + id;
-const jobKey = 'download-job';
-const filenameKey = 'download-filename';
+const jobsKey = 'download-jobs';
+const maxActiveJobs = 4;
+const maxRecentJobs = 8;
 const workerPage = chrome.runtime.getURL('download.html');
-const refererRule = 50001;
+const firstRefererRule = 50001;
 const jobLock = -1;
 const web = { urls: ['https://*/*', 'http://*/*'], types: ['media', 'xmlhttprequest', 'other'] };
 const pending = new Map();
@@ -88,7 +89,9 @@ function onMediaHeaders(details) {
     // Requests can complete after a same-document navigation. Only collect requests
     // initiated since the selected page's generation, including iframe requests.
     if (!began || began < state.since) return;
-    state.entries = combineCandidates(state.entries, [{ url, kind, mime, bytes, fileTitle }]).slice(0, 100);
+    const entries = captureCandidate(state.entries, { url, kind, mime, bytes, fileTitle });
+    if (entries === state.entries) return;
+    state.entries = entries;
     await setTab(details.tabId, state);
   }).catch(() => {});
 }
@@ -110,9 +113,9 @@ chrome.webRequest.onBeforeRequest.addListener(details => {
   if (!session) return;
   const key = playbackKey(details.tabId);
   void serialize(details.tabId, async () => {
-    const previous = (await chrome.storage.session.get(key))[key];
-    if (previous?.config === session.config && Date.now() - previous.captured < 30_000) return;
-    await chrome.storage.session.set({ [key]: session });
+    const previous = (await chrome.storage.session.get(key))[key] ?? [];
+    const sessions = rememberYouTubePlayback(previous, session);
+    if (sessions !== previous) await chrome.storage.session.set({ [key]: sessions });
   }).catch(() => {});
 }, { urls: ['https://*.googlevideo.com/videoplayback*'] }, ['requestBody']);
 
@@ -167,55 +170,67 @@ async function scan(tabId, downloadPostId = null, forDownload = false) {
         state?.epoch !== capture.epoch || !top || pageKey(top.url) !== page) {
       throw new Error('页面已切换，请重新扫描。');
     }
-    const snapshots = frames.flatMap(item => item.result ? addSnapshot(item.result, item.frameId) : []);
-    const douyin = snapshots.find(entry => entry.site === 'douyin-video' && entry.postId === top.douyinPost);
-    if (douyin && (state.douyin?.id !== douyin.id || JSON.stringify(state.douyin.files) !== JSON.stringify(douyin.files))) {
-      state.douyin = douyin;
-      await setTab(tabId, state);
-    }
-    let entries = combineCandidates(state.entries, snapshots);
+    let entries;
     if (top.site === 'youtube') {
-      entries = addSnapshot(top, 0);
-      const manifests = (top.youtubeManifests ?? []).filter(item => mediaUrl(item.url));
       const source = top.youtubeSabr;
+      entries = source ? [] : addSnapshot(top, 0);
       if (source) {
         const key = playbackKey(tabId);
-        const session = (await chrome.storage.session.get(key))[key];
+        const sessions = (await chrome.storage.session.get(key))[key] ?? [];
+        const session = sessions.find(item => matchesYouTubePlayback(item, source));
         const { videoId, duration, video, audio } = source;
-        entries = [];
-        if (matchesYouTubePlayback(session, source)) {
+        if (session) {
           entries.push({ id: 'youtube:' + videoId + ':sabr', kind: 'youtube-sabr', site: 'youtube',
             videoId, duration, video, audio, title: top.title, ...(forDownload ? { session } : {}) });
         } else {
+          entries = addSnapshot(top, 0);
           top.hint = '请先播放 YouTube 正片几秒。扩展会在收到这条视频的音视频数据后显示下载项。';
         }
       }
-      entries.push(...manifests);
+      entries.push(...(top.youtubeManifests ?? []).filter(item => mediaUrl(item.url)));
+    } else {
+      const snapshots = frames.flatMap(item => item.result ? addSnapshot(item.result, item.frameId) : []);
+      const douyin = snapshots.find(entry => entry.site === 'douyin-video' && entry.postId === top.douyinPost);
+      if (douyin && (state.douyin?.id !== douyin.id || JSON.stringify(state.douyin.files) !== JSON.stringify(douyin.files))) {
+        state.douyin = douyin;
+        await setTab(tabId, state);
+      }
+      entries = combineCandidates(state.entries, snapshots);
+      if (top.site === 'x') entries = xCandidates(entries, top, state.xEntries);
+      else if (state.douyin?.postId && state.douyin.postId === top.douyinPost) entries = [state.douyin];
     }
-    else if (top.site === 'x') entries = xCandidates(entries, top, state.xEntries);
-    else if (state.douyin?.postId && state.douyin.postId === top.douyinPost) entries = [state.douyin];
     const named = titleCandidates(entries, top.title);
     return { page, title: top.title, entries: [...named, ...entries.filter(entry => entry.kind === 'fragment')],
       epoch: capture.epoch, hint: top.hint };
   });
 }
 
-async function currentJob() {
-  return (await chrome.storage.session.get(jobKey))[jobKey];
+const isActiveJob = job => job.state === 'queued' || job.state === 'running';
+
+async function getJobs() {
+  return (await chrome.storage.session.get(jobsKey))[jobsKey] ?? [];
 }
 
 chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
   if (item.byExtensionId !== chrome.runtime.id) return;
-  chrome.storage.session.get(filenameKey).then(values => {
-    const pending = values[filenameKey];
-    suggest(pending?.url === item.url ? { filename: pending.filename, conflictAction: 'uniquify' } : undefined);
+  getJobs().then(jobs => {
+    const job = jobs.find(job => job.nativeDownloadId === item.id)
+      ?? jobs.find(job => job.nativeDownloadId == null && job.nativeUrl === item.url);
+    suggest(job?.nativeFilename ? { filename: job.nativeFilename, conflictAction: 'uniquify' } : undefined);
   }, () => suggest());
   return true;
 });
 
 async function setJob(job) {
-  await chrome.storage.session.set({ [jobKey]: job });
-  await chrome.action.setBadgeText({ text: ['queued', 'running'].includes(job.state) ? '↓' : '' }).catch(() => {});
+  const jobs = await getJobs();
+  const index = jobs.findIndex(item => item.id === job.id);
+  if (index < 0) jobs.unshift(job);
+  else jobs[index] = job;
+  const active = jobs.filter(isActiveJob);
+  await chrome.storage.session.set({
+    [jobsKey]: [...active, ...jobs.filter(item => !isActiveJob(item)).slice(0, maxRecentJobs)],
+  });
+  await chrome.action.setBadgeText({ text: active.length ? '↓' + active.length : '' }).catch(() => {});
 }
 
 async function workerExists() {
@@ -224,65 +239,88 @@ async function workerExists() {
   })).length > 0;
 }
 
-async function closeWorker() {
-  await chrome.storage.session.remove(filenameKey).catch(() => {});
-  await chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: [refererRule] }).catch(() => {});
+async function closeIdleWorker() {
+  if ((await getJobs()).some(isActiveJob)) return;
+  const rules = await chrome.declarativeNetRequest.getSessionRules();
+  await removeRefererRules(rules.filter(rule => rule.id >= firstRefererRule).map(rule => rule.id));
   if (await workerExists()) await chrome.offscreen.closeDocument().catch(() => {});
 }
 
-async function reconcileJob() {
-  const job = await currentJob();
-  if (!job || !['queued', 'running'].includes(job.state)) return null;
-  if (await workerExists()) {
-    const response = await chrome.runtime.sendMessage({ type: 'probe-download', id: job.id }).catch(() => null);
-    if (response?.active) return job;
+async function removeRefererRules(ids) {
+  if (ids?.length) await chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: ids }).catch(() => {});
+}
+
+async function finishJob(job, result) {
+  await removeRefererRules(job.refererRules);
+  const { refererRules, nativeUrl, nativeFilename, ...status } = job;
+  await setJob({ ...status, ...result });
+  await closeIdleWorker();
+}
+
+async function reconcileJobs() {
+  const jobs = (await getJobs()).filter(isActiveJob);
+  if (!jobs.length) return;
+  const response = await workerExists()
+    ? await chrome.runtime.sendMessage({ type: 'probe-downloads' }).catch(() => null) : null;
+  for (const job of jobs) {
+    if (response?.ids?.includes(job.id)) continue;
+    if (job.nativeDownloadId != null) await chrome.downloads.cancel(job.nativeDownloadId).catch(() => {});
+    await finishJob(job, { state: 'failed', message: '后台下载中断，请重新点击视频。' });
   }
-  await closeWorker();
-  await setJob({ ...job, state: 'failed', message: '后台下载中断，请重新点击视频。' });
-  return null;
 }
 
 async function startJob(message) {
-  if (await reconcileJob()) throw new Error('已有一个下载正在进行。');
   const douyinPost = message.selection?.match(/^douyin-video:\d+:files:(\d+)$/)?.[1];
   const snapshot = await scan(message.tabId, douyinPost, true);
-  if (snapshot.page !== message.page || snapshot.epoch !== message.epoch) {
-    throw new Error('页面已切换，请重新扫描。');
-  }
   const candidate = snapshot.entries.find(entry => (entry.id ?? entry.url) === message.selection);
-  if (!candidate || candidate.kind === 'fragment') throw new Error('媒体地址已变化，请播放后重新扫描。');
-
-  const id = crypto.randomUUID();
-  const title = cleanTitle(message.title) || candidate.title;
-  const status = { id, title, tabId: message.tabId, page: snapshot.page, site: candidate.site,
-    state: 'queued', message: '正在启动后台下载…' };
-  await setJob(status);
-  try {
-    if (!await workerExists()) {
-      await chrome.offscreen.createDocument({
-        url: 'download.html', reasons: ['BLOBS'],
-        justification: 'Read and combine selected media streams before saving through the browser downloads manager.',
-      });
+  return serialize(jobLock, async () => {
+    const state = await tabState(message.tabId);
+    if (snapshot.page !== message.page || snapshot.epoch !== message.epoch || state?.epoch !== snapshot.epoch) {
+      throw new Error('页面已切换，请重新扫描。');
     }
-    const response = await chrome.runtime.sendMessage({ type: 'run-download', job: { id, title, candidate } });
-    if (!response?.accepted) throw new Error('后台下载未能启动，请重试。');
-    return { id };
-  } catch (error) {
-    await setJob({ ...status, state: 'failed', message: error.message });
-    await closeWorker();
-    throw error;
-  }
+    if (!candidate || candidate.kind === 'fragment') throw new Error('媒体地址已变化，请播放后重新扫描。');
+    await reconcileJobs();
+    const active = (await getJobs()).filter(isActiveJob);
+    if (active.some(job => job.tabId === message.tabId && job.page === snapshot.page
+        && job.selection === message.selection)) {
+      throw new Error('这个视频已经在下载。');
+    }
+    if (active.length >= maxActiveJobs) throw new Error('最多同时下载 ' + maxActiveJobs + ' 个视频，请等一个完成后再试。');
+
+    const id = crypto.randomUUID();
+    const title = cleanTitle(message.title) || candidate.title;
+    const status = { id, title, tabId: message.tabId, page: snapshot.page, site: candidate.site,
+      selection: message.selection, state: 'queued', message: '正在启动后台下载…' };
+    await setJob(status);
+    try {
+      if (!await workerExists()) {
+        await chrome.offscreen.createDocument({
+          url: 'download.html', reasons: ['BLOBS'],
+          justification: 'Read and combine selected media streams before saving through the browser downloads manager.',
+        });
+      }
+      const response = await chrome.runtime.sendMessage({ type: 'run-download', job: { id, title, candidate } });
+      if (!response?.accepted) throw new Error('后台下载未能启动，请重试。');
+      return { id };
+    } catch (error) {
+      await finishJob(status, { state: 'failed', message: error.message });
+      throw error;
+    }
+  });
 }
 
 async function cancelJob(id) {
-  const job = await reconcileJob();
-  if (job?.id !== id) return;
-  await chrome.runtime.sendMessage({ type: 'cancel-download', id }).catch(() => {});
+  await reconcileJobs();
+  const job = (await getJobs()).find(item => item.id === id);
+  if (job && isActiveJob(job)) {
+    const response = await chrome.runtime.sendMessage({ type: 'cancel-download', id });
+    if (!response?.accepted) throw new Error('后台未能取消此任务，请重试。');
+  }
 }
 
 async function handleWorkerMessage(message) {
-  const job = await currentJob();
-  if (job?.id !== message.id || !['queued', 'running'].includes(job.state)) return;
+  const job = (await getJobs()).find(item => item.id === message.id);
+  if (!job || !isActiveJob(job)) return;
   if (message.type === 'download-progress') {
     await setJob({ ...job, state: 'running', message: message.message, done: message.done, total: message.total,
       bytesPerSecond: message.bytesPerSecond });
@@ -292,16 +330,21 @@ async function handleWorkerMessage(message) {
       const path = result.filename.replace(/[/\\][^/\\]*$/, '');
       await chrome.storage.local.set({ 'last-download-directory': path }).catch(() => {});
     }
-    await setJob({ ...job, ...result });
-    await closeWorker();
+    await finishJob(job, result);
   } else if (message.type === 'download-native-start') {
     const allowedBlob = message.url.startsWith('blob:' + chrome.runtime.getURL('').slice(0, -1) + '/');
     if (!allowedBlob && !mediaUrl(message.url)) throw new Error('下载地址无效。');
-    await chrome.storage.session.set({ [filenameKey]: { url: message.url, filename: message.filename } });
+    const naming = { ...job, nativeUrl: message.url, nativeFilename: message.filename };
+    await setJob(naming);
     const downloadId = await chrome.downloads.download({
       url: message.url, filename: message.filename, saveAs: false, conflictAction: 'uniquify',
     });
-    await setJob({ ...job, nativeDownloadId: downloadId });
+    try {
+      await setJob({ ...naming, nativeDownloadId: downloadId });
+    } catch (error) {
+      await chrome.downloads.cancel(downloadId).catch(() => {});
+      throw error;
+    }
   } else if (message.type === 'download-native-status') {
     const [item] = await chrome.downloads.search({ id: job.nativeDownloadId });
     if (!item) throw new Error('浏览器下载记录已移除。');
@@ -318,17 +361,27 @@ async function handleWorkerMessage(message) {
     if (!platform || !message.urls.length || message.urls.some(url => !mediaUrl(url) || platform.accepts?.(url) === false)) {
       throw new Error('此媒体地址无法使用站点来源设置。');
     }
-    const requestDomains = [...new Set(message.urls.map(url => new URL(url).hostname))];
-    await chrome.declarativeNetRequest.updateSessionRules({
-      removeRuleIds: [refererRule],
-      addRules: [{
-        id: refererRule, priority: 1,
-        action: { type: 'modifyHeaders', requestHeaders: [
-          { header: 'Referer', operation: 'set', value: platform.referer },
-        ] },
-        condition: { initiatorDomains: [chrome.runtime.id], requestDomains, resourceTypes: ['xmlhttprequest'] },
-      }],
-    });
+    const urls = [...new Set(message.urls.map(value => {
+      const url = new URL(value);
+      url.hash = '';
+      return url.href;
+    }))];
+    const existing = await chrome.declarativeNetRequest.getSessionRules();
+    let nextId = Math.max(firstRefererRule - 1, ...existing.map(rule => rule.id));
+    const rules = urls.map(url => ({
+      id: ++nextId,
+      priority: 1,
+      action: { type: 'modifyHeaders', requestHeaders: [
+        { header: 'Referer', operation: 'set', value: platform.referer },
+      ] },
+      condition: {
+        initiatorDomains: [chrome.runtime.id], resourceTypes: ['xmlhttprequest'],
+        isUrlFilterCaseSensitive: true,
+        ...(/[|*^]/.test(url) ? { regexFilter: '^' + url.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$' } : { urlFilter: '|' + url + '|' }),
+      },
+    }));
+    await setJob({ ...job, refererRules: [...(job.refererRules ?? []), ...rules.map(rule => rule.id)] });
+    await chrome.declarativeNetRequest.updateSessionRules({ addRules: rules });
   }
 }
 
@@ -337,9 +390,9 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
   let result;
   if (sender.url === chrome.runtime.getURL('popup.html')) {
     if (message.type === 'scan') result = scan(message.tabId);
-    if (message.type === 'start') result = serialize(jobLock, () => startJob(message));
+    if (message.type === 'start') result = startJob(message);
     if (message.type === 'cancel') result = serialize(jobLock, () => cancelJob(message.id));
-    if (message.type === 'reconcile') result = serialize(jobLock, reconcileJob);
+    if (message.type === 'reconcile') result = serialize(jobLock, reconcileJobs);
   } else if (sender.url === workerPage && message.type.startsWith('download-')) {
     result = serialize(jobLock, () => handleWorkerMessage(message));
   }

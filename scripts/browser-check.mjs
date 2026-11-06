@@ -8,7 +8,7 @@ import path from 'node:path';
 import { chromium } from 'playwright';
 
 const nas = process.env.WEB_VIDEO_TEST_DIR;
-if (!nas) throw new Error('Set WEB_VIDEO_TEST_DIR to a writable video test directory.');
+if (!nas) throw new Error('Set WEB_VIDEO_TEST_DIR to an existing writable directory for test media.');
 const media = await mkdtemp(path.join(nas, '.web-video-check-'));
 const scratch = await mkdtemp(path.join(os.tmpdir(), 'web-video-browser-'));
 const dist = path.join(scratch, 'dist');
@@ -63,8 +63,17 @@ try {
   let breakNextReplayBody = false;
   let replayFailures = 0;
   let replayBodyFailures = 0;
+  let replayManifestRequests = 0;
   server = createServer(async (req, res) => {
     const url = new URL(req.url, 'http://127.0.0.1');
+    if (req.method === 'GET' && url.pathname === '/replay.m3u8') replayManifestRequests++;
+    if (url.pathname === '/fixture/status/111') {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end('<title>X 测试</title><article><div data-testid="tweetText">X 第一条</div>' +
+        '<a href="/fixture/status/111">帖子</a>' +
+        '<video poster="https://pbs.twimg.com/ext_tw_video_thumb/111/pu/img/a.jpg"></video></article>');
+      return;
+    }
     if (url.pathname === '/page') {
       const mode = url.searchParams.get('mode');
       const element = mode === 'direct' ? '<video controls title="选中视频标题" src="/direct.mp4"></video><script>fetch("/direct.mp4", {headers:{Range:"bytes=0-1023"}}).then(r=>r.arrayBuffer())</script>'
@@ -98,6 +107,7 @@ try {
     if (start > end) { res.writeHead(416, { 'Content-Range': 'bytes */' + info.size }).end(); return; }
     res.writeHead(match ? 206 : 200, {
       'Accept-Ranges': 'bytes', 'Content-Type': mime, 'Content-Length': end - start + 1,
+      'Access-Control-Allow-Origin': '*',
       ...(match ? { 'Content-Range': 'bytes ' + start + '-' + end + '/' + info.size } : {}),
     });
     if (req.method === 'HEAD') { res.end(); return; }
@@ -127,7 +137,8 @@ try {
   const launch = () => chromium.launchPersistentContext(profile, {
     channel: 'chromium', executablePath: process.env.WEB_VIDEO_CHROME || undefined,
     headless: true, acceptDownloads: true, downloadsPath: media,
-    args: ['--disable-extensions-except=' + dist, '--load-extension=' + dist, '--no-proxy-server'],
+    args: ['--disable-extensions-except=' + dist, '--load-extension=' + dist, '--no-proxy-server',
+      '--host-resolver-rules=MAP x.com 127.0.0.1, MAP video.twimg.com 127.0.0.1'],
   });
   browser = await launch();
   let worker = browser.serviceWorkers()[0] ?? await browser.waitForEvent('serviceworker', { timeout: 10000 });
@@ -158,13 +169,13 @@ try {
       await page.waitForFunction(({ selector, expression }) =>
         new RegExp(expression).test(document.querySelector(selector)?.textContent), { selector, expression }, { timeout });
     } catch {
-      throw new Error('Expected ' + expression + '; got ' + await page.locator(selector).innerText());
+      throw new Error('Expected ' + expression + '; got ' + JSON.stringify(await page.locator(selector).allTextContents()));
     }
   }
 
   const initial = await popupFor('direct');
   assert.equal(await initial.locator('#media .media-title').first().innerText(), '选中视频标题');
-  assert.deepEqual(await worker.evaluate(() => chrome.storage.session.get('download-job')), {});
+  assert.deepEqual(await worker.evaluate(() => chrome.storage.session.get('download-jobs')), {});
   let options = await browser.newPage();
   await options.goto(prefix + 'options.html');
   assert.equal(await options.locator('#choose-directory').count(), 0);
@@ -198,9 +209,12 @@ try {
 
   async function start(popup, label) {
     const tabsBefore = browser.pages().length;
+    const previous = await popup.locator('.job').evaluateAll(rows => rows.map(row => row.dataset.jobId));
     await popup.getByRole('button', { name: label }).click();
-    await popup.locator('#download-job').waitFor();
+    const next = await popup.waitForFunction(ids => Array.from(document.querySelectorAll('.job'))
+      .find(row => !ids.includes(row.dataset.jobId))?.dataset.jobId, previous);
     assert.equal(browser.pages().length, tabsBefore, 'download opened a visible tab');
+    return '.job[data-job-id="' + await next.jsonValue() + '"]';
   }
 
   await videoPage.goto(origin + '/page?mode=opaque');
@@ -224,7 +238,7 @@ try {
   await start(direct, /选中视频标题.*完整文件/);
   await direct.close();
   const reopened = await popupFor('direct');
-  await status(reopened, '#job-message', '已保存');
+  await status(reopened, '.job:first-child .job-message', '已保存');
   await reopened.close();
   await saveToNas('选中视频标题.mp4', 6);
   assert.deepEqual(await worker.evaluate(async () => {
@@ -235,14 +249,14 @@ try {
   }), ['media-other']);
   const repeated = await popupFor('direct');
   await start(repeated, /选中视频标题.*完整文件/);
-  await status(repeated, '#job-message', '已保存.*\\(1\\)');
+  await status(repeated, '.job:first-child .job-message', '已保存.*\\(1\\)');
   assert.equal((await files()).length, 2);
   await repeated.close();
 
   await maxSize(1);
   const limited = await popupFor('replay.m3u8');
   await start(limited, /HLS 清单/);
-  await status(limited, '#job-message', '超出设置的 1 MiB 上限');
+  await status(limited, '.job:first-child .job-message', '超出设置的 1 MiB 上限');
   assert.equal((await files()).length, 2);
   await limited.close();
   await maxSize(0);
@@ -253,48 +267,55 @@ try {
     failNextReplaySegment = mode === 'replay.m3u8';
     breakNextReplayBody = mode === 'replay.m3u8';
     const popup = await popupFor(mode);
+    const beforeDownload = replayManifestRequests;
     await start(popup, label);
-    await status(popup, '#job-message', '已保存', 120000);
-    const job = await worker.evaluate(async () => (await chrome.storage.session.get('download-job'))['download-job']);
+    await status(popup, '.job:first-child .job-message', '已保存', 120000);
+    const job = await worker.evaluate(async () => (await chrome.storage.session.get('download-jobs'))['download-jobs'][0]);
     await saveToNas(job.filename, duration);
+    if (mode === 'replay.m3u8') {
+      assert.ok(replayManifestRequests - beforeDownload <= 2, 'direct HLS repeated its preflight request');
+    }
     await popup.close();
   }
   assert.equal(replayFailures, 1, 'HLS regression did not exercise a transient segment failure');
   assert.equal(replayBodyFailures, 1, 'HLS regression did not exercise an interrupted response body');
 
-  const bili = 'https://www.bilibili.com/video/BV1Example';
-  await videoPage.route(bili, route => route.fulfill({
-    contentType: 'text/html; charset=utf-8',
-    body: '<title>B 站分离轨测试</title><script>' +
-      'window.__INITIAL_STATE__={videoData:{bvid:"BV1Example",cid:42,title:"B 站分离轨测试"}};' +
-      'window.__playinfo__={data:' + JSON.stringify({
-        dash: {
-          video: [{ baseUrl: origin + '/replay-video.mp4', width: 160, height: 90 }],
-          audio: [{ baseUrl: origin + '/replay-audio.mp4' }],
-        },
-      }) + '};</script>',
-  }));
-  await videoPage.route('https://api.bilibili.com/x/player/playurl?*', route => route.abort());
-  await videoPage.goto(bili);
+  async function openBili(page) {
+    const bili = 'https://www.bilibili.com/video/BV1Example';
+    await page.route(bili, route => route.fulfill({
+      contentType: 'text/html; charset=utf-8',
+      body: '<title>B 站分离轨测试</title><script>' +
+        'window.__INITIAL_STATE__={videoData:{bvid:"BV1Example",cid:42,title:"B 站分离轨测试"}};' +
+        'window.__playinfo__={data:' + JSON.stringify({
+          dash: {
+            video: [{ baseUrl: origin + '/replay-video.mp4', width: 160, height: 90 }],
+            audio: [{ baseUrl: origin + '/replay-audio.mp4' }],
+          },
+        }) + '};</script>',
+    }));
+    await page.route('https://api.bilibili.com/x/player/playurl?*', route => route.abort());
+    await page.goto(bili);
+  }
+  await openBili(videoPage);
   const paired = await browser.newPage();
   await videoPage.bringToFront();
   await paired.goto(prefix + 'popup.html');
   await start(paired, /分离音视频/);
-  await status(paired, '#job-message', '已保存');
+  await status(paired, '.job:first-child .job-message', '已保存');
   await saveToNas('B 站分离轨测试.mp4', 6);
   assert.deepEqual([...biliVideoRequests], ['range', 'full']);
   await paired.close();
 
   const live = await popupFor('live.m3u8');
   await start(live, /HLS 清单/);
-  await status(live, '#job-message', '正在播的 HLS 直播');
+  await status(live, '.job:first-child .job-message', '正在播的 HLS 直播');
   await live.close();
 
   const cancel = await popupFor('replay.m3u8');
   delaySegments = true;
   await start(cancel, /HLS 清单/);
-  await cancel.locator('#cancel-job').click();
-  await status(cancel, '#job-message', '已取消');
+  await cancel.locator('.job:first-child button').click();
+  await status(cancel, '.job:first-child .job-message', '已取消');
   assert.equal((await files()).length, 6);
   await cancel.close();
   delaySegments = false;
@@ -329,7 +350,7 @@ try {
   assert.equal((await files()).length, 6, 'native download records did not survive restart');
   const changed = await popupFor('direct');
   await start(changed, /完整文件/);
-  await status(changed, '#job-message', '已保存');
+  await status(changed, '.job:first-child .job-message', '已保存');
   await status(options, '#last-download-path', 'changed-browser-downloads$');
   const relocated = (await files()).find(item => path.dirname(item.filename) === changedDirectory);
   assert.ok(relocated, 'browser did not use its changed default download directory');
@@ -338,7 +359,7 @@ try {
 
   const silent = await popupFor('silent.mp4');
   await start(silent, /完整文件/);
-  await status(silent, '#job-message', '已保存');
+  await status(silent, '.job:first-child .job-message', '已保存');
   const silentFile = (await files()).find(item => item.filename.endsWith('Fixture silent.mp4'));
   assert.ok(silentFile, 'video without an audio track did not reach the native downloads manager');
   verify(silentFile.filename, 6, false);
@@ -347,7 +368,7 @@ try {
   await maxSize(1);
   const capped = await popupFor('direct');
   await start(capped, /完整文件/);
-  await status(capped, '#job-message', '已保存');
+  await status(capped, '.job:first-child .job-message', '已保存');
   await capped.close();
   await maxSize(0);
 
@@ -355,8 +376,78 @@ try {
   await expired.locator('.media').first().waitFor();
   await rm(path.join(media, 'direct.mp4'));
   await start(expired, /完整文件/);
-  await status(expired, '#job-message', '已过期');
+  await status(expired, '.job:first-child .job-message', '已过期');
+  await expired.close();
   console.log('一键后台保存、关弹窗继续、大小上限、同名保护、取消与切页均通过。');
+
+  // X uses different HLS masters for two posts on the same tab. Route the page
+  // locally and serve both real media playlists through the fixture CDN host.
+  const port = server.address().port;
+  const xPost = 'http://x.com:' + port + '/fixture/status/';
+  const cdn = 'http://video.twimg.com:' + port;
+  await videoPage.route('https://pbs.twimg.com/**', route => route.abort());
+  await videoPage.goto(xPost + '111');
+  const xPopup = await browser.newPage();
+  await videoPage.bringToFront();
+  await xPopup.goto(prefix + 'popup.html');
+  const getPlaylist = url => videoPage.evaluate(address => fetch(address).then(response => response.text()), url);
+  delaySegments = true;
+  await getPlaylist(cdn + '/ext_tw_video/111/pl/replay.m3u8');
+  const firstX = await start(xPopup, /X 第一条.*HLS 清单/);
+  await status(xPopup, firstX + ' .job-message', '合并音视频');
+  await videoPage.evaluate(() => {
+    history.pushState(null, '', '/fixture/status/222');
+    document.querySelector('article').innerHTML =
+      '<div data-testid="tweetText">X 第二条</div><a href="/fixture/status/222">帖子</a>' +
+      '<video poster="https://pbs.twimg.com/ext_tw_video_thumb/222/pu/img/b.jpg"></video>';
+  });
+  await getPlaylist(cdn + '/ext_tw_video/222/pl/split.m3u8');
+  const secondX = await start(xPopup, /X 第二条.*HLS 清单/);
+  await status(xPopup, secondX + ' .job-message', '已保存');
+  assert.equal(await xPopup.locator(firstX + ' button').isVisible(), true, 'first X job ended before the second saved');
+
+  const biliPage = await browser.newPage();
+  await openBili(biliPage);
+  const biliJob = await start(xPopup, /B 站分离轨测试.*分离音视频/);
+
+  const note = 'https://www.xiaohongshu.com/explore/abc123';
+  await videoPage.route(note, route => route.fulfill({
+    contentType: 'text/html; charset=utf-8',
+    body: '<title>小红书测试</title><script>window.__INITIAL_STATE__=' + JSON.stringify({
+      note: { noteDetailMap: { abc123: { note: { title: '小红书视频', video: { media: {
+        stream: { h264: [{ masterUrl: origin + '/silent.mp4' }] },
+      } } } } } },
+    }) + '</script>',
+  }));
+  await videoPage.goto(note);
+  await videoPage.bringToFront();
+  const noteJob = await start(xPopup, /小红书视频.*完整文件/);
+  await status(xPopup, biliJob + ' .job-message', '已保存');
+  await status(xPopup, noteJob + ' .job-message', '已保存');
+  await biliPage.close();
+
+  await videoPage.goto(origin + '/page?mode=replay.m3u8');
+  const discard = await start(xPopup, /Fixture replay.m3u8.*HLS 清单/);
+  await status(xPopup, discard + ' .job-message', '合并音视频');
+  await xPopup.locator(discard + ' button').click();
+  await status(xPopup, discard + ' .job-message', '已取消');
+  assert.equal(await xPopup.locator(firstX + ' button').isVisible(), true, 'cancel also stopped the first X job');
+  await xPopup.close();
+  const reopenedJobs = await browser.newPage();
+  await videoPage.bringToFront();
+  await reopenedJobs.goto(prefix + 'popup.html');
+  await status(reopenedJobs, firstX + ' .job-message', '已保存', 120000);
+  const completed = await files();
+  for (const [name, seconds, audio] of [
+    ['X 第一条.mp4', 720, true], ['X 第二条.mp4', 6, true],
+    ['B 站分离轨测试.mp4', 6, true], ['小红书视频.mp4', 6, false],
+  ]) {
+    const saved = completed.find(item => item.filename === path.join(changedDirectory, name));
+    assert.ok(saved, name);
+    verify(saved.filename, seconds, audio);
+  }
+  console.log('X 同页切帖并行、B 站和小红书跨页并行、单独取消及重开弹窗通过。');
+
 } finally {
   await browser?.close();
   if (server) {

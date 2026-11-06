@@ -6,9 +6,10 @@ let currentTab;
 let currentPage;
 let scheduledRefresh;
 let revision = 0;
-let job;
-let starting = false;
-let cancelling = false;
+let jobs = [];
+const starting = new Set();
+const cancelling = new Set();
+const jobRows = new Map();
 
 async function call(type, args = {}) {
   const reply = await chrome.runtime.sendMessage({ type, ...args });
@@ -16,43 +17,69 @@ async function call(type, args = {}) {
   return reply.data;
 }
 
-function isActive() {
-  return job?.state === 'queued' || job?.state === 'running';
-}
+const isActive = job => job.state === 'queued' || job.state === 'running';
+const selectionKey = (tabId, page, selection) => JSON.stringify([tabId, page, selection]);
 
-function syncJob() {
-  const active = isActive();
-  for (const button of $('media').querySelectorAll('.media')) button.disabled = active || starting;
-  $('download-job').hidden = !job || (!active && (job.tabId !== currentTab || job.page !== currentPage));
-  if (!job) return;
-  $('job-title').textContent = job.title || '网页视频';
-  const message = job.message || jobLabels[job.state] || '';
-  const speed = active && job.bytesPerSecond > 0
-    ? ' · ' + (job.bytesPerSecond / 1048576).toFixed(2) + ' MiB/s' : '';
-  $('job-message').textContent = cancelling ? '正在取消…' : message + speed;
-  $('cancel-job').hidden = !active;
-  $('cancel-job').disabled = cancelling;
-  const progress = $('job-progress');
-  progress.hidden = !active || !(job.total > 0) || !Number.isFinite(job.done);
-  if (!progress.hidden) {
-    progress.max = job.total;
-    progress.value = Math.max(0, Math.min(job.done, job.total));
+function syncJobs() {
+  const activeSelections = new Set(jobs.filter(job => isActive(job) && job.tabId === currentTab && job.page === currentPage)
+    .map(job => job.selection));
+  for (const button of $('media').children) {
+    button.disabled = activeSelections.has(button.dataset.selection)
+      || starting.has(selectionKey(currentTab, currentPage, button.dataset.selection));
+  }
+
+  const list = $('download-jobs');
+  list.hidden = !jobs.length;
+  const ids = new Set(jobs.map(job => job.id));
+  for (const [id, row] of jobRows) {
+    if (ids.has(id)) continue;
+    row.remove();
+    jobRows.delete(id);
+  }
+  for (const [index, job] of jobs.entries()) {
+    let row = jobRows.get(job.id);
+    if (!row) {
+      row = $('job-template').content.firstElementChild.cloneNode(true);
+      row.dataset.jobId = job.id;
+      row.querySelector('button').addEventListener('click', () => { void cancel(job.id); });
+      jobRows.set(job.id, row);
+    }
+    const [title, status, progress, button] = row.children;
+    const active = isActive(job);
+    const name = job.title || '网页视频';
+    if (title.textContent !== name) title.textContent = name;
+    const message = job.message || jobLabels[job.state] || '';
+    const speed = active && job.bytesPerSecond > 0
+      ? ' · ' + (job.bytesPerSecond / 1048576).toFixed(2) + ' MiB/s' : '';
+    const label = cancelling.has(job.id) && active ? '正在取消…' : message + speed;
+    if (status.textContent !== label) status.textContent = label;
+    button.hidden = !active;
+    button.disabled = cancelling.has(job.id);
+    button.setAttribute('aria-label', '取消下载 ' + name);
+    progress.hidden = !active || !(job.total > 0) || !Number.isFinite(job.done);
+    if (!progress.hidden) {
+      progress.max = job.total;
+      progress.value = Math.max(0, Math.min(job.done, job.total));
+    }
+    if (list.children[index] !== row) list.insertBefore(row, list.children[index] ?? null);
   }
 }
 
 async function start(result, entry, tabId) {
-  if (starting || isActive()) return;
-  starting = true;
-  syncJob();
+  const selection = entry.id ?? entry.url;
+  const key = selectionKey(tabId, result.page, selection);
+  if (starting.has(key)) return;
+  starting.add(key);
+  syncJobs();
   try {
     await call('start', {
-      tabId, page: result.page, epoch: result.epoch, selection: entry.id ?? entry.url, title: entry.title,
+      tabId, page: result.page, epoch: result.epoch, selection, title: entry.title,
     });
   } catch (error) {
     $('state').textContent = error.message;
   } finally {
-    starting = false;
-    syncJob();
+    starting.delete(key);
+    syncJobs();
   }
 }
 
@@ -70,7 +97,7 @@ async function refresh(quiet = false) {
       currentTab = tab?.id;
       currentPage = undefined;
       $('media').replaceChildren();
-      syncJob();
+      syncJobs();
     }
     if (currentTab == null) throw new Error('没有可扫描的当前页面。');
     const result = await call('scan', { tabId: currentTab });
@@ -110,7 +137,7 @@ async function refresh(quiet = false) {
       if (media.children[index] !== button) media.insertBefore(button, media.children[index] ?? null);
     }
     for (const button of existing.values()) button.remove();
-    syncJob();
+    syncJobs();
   } catch (error) {
     if (run === revision) $('state').textContent = error.message;
   } finally {
@@ -122,24 +149,24 @@ $('settings').addEventListener('click', async () => {
   try { await chrome.runtime.openOptionsPage(); }
   catch (error) { $('state').textContent = error.message; }
 });
-$('cancel-job').addEventListener('click', async () => {
-  if (cancelling || !isActive()) return;
-  cancelling = true;
-  syncJob();
-  try { await call('cancel', { id: job.id }); }
-  catch (error) { $('state').textContent = error.message; }
-  finally {
-    cancelling = false;
-    syncJob();
+async function cancel(id) {
+  if (cancelling.has(id)) return;
+  cancelling.add(id);
+  syncJobs();
+  try { await call('cancel', { id }); }
+  catch (error) {
+    cancelling.delete(id);
+    $('state').textContent = error.message;
+    syncJobs();
   }
-});
+}
 function scheduleRefresh(clear) {
   if (clear) {
     revision++;
     currentPage = undefined;
     $('media').replaceChildren();
     $('state').textContent = '正在读取新页面…';
-    syncJob();
+    syncJobs();
   }
   if (scheduledRefresh != null) return;
   scheduledRefresh = setTimeout(() => {
@@ -158,18 +185,21 @@ chrome.tabs.onUpdated.addListener((tabId, change) => {
   if (change.url || change.status === 'loading') scheduleRefresh(true);
   else if (change.status === 'complete') scheduleRefresh(false);
 });
-let jobChanged = false;
+let jobsChanged = false;
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== 'session') return;
   if (changes['tab:' + currentTab] || changes['youtube-playback:' + currentTab]) scheduleRefresh(false);
-  if (changes['download-job']) {
-    jobChanged = true;
-    job = changes['download-job'].newValue;
-    syncJob();
+  if (changes['download-jobs']) {
+    jobsChanged = true;
+    jobs = changes['download-jobs'].newValue ?? [];
+    for (const id of cancelling) {
+      if (!jobs.some(job => job.id === id && isActive(job))) cancelling.delete(id);
+    }
+    syncJobs();
   }
 });
-const initial = await chrome.storage.session.get('download-job');
-if (!jobChanged) job = initial['download-job'];
-syncJob();
+const initial = await chrome.storage.session.get('download-jobs');
+if (!jobsChanged) jobs = initial['download-jobs'] ?? [];
+syncJobs();
 void call('reconcile').catch(() => {});
 void refresh();

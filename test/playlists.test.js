@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { chromeFilename, classify, combineCandidates, dispositionTitle, originPattern, safeFilename, selectQuality, titleCandidates } from '../src/media.js';
+import { captureCandidate, chromeFilename, classify, combineCandidates, dispositionTitle, originPattern, safeFilename, selectQuality, titleCandidates } from '../src/media.js';
 import { dashManifest, hlsChildren, hlsManifest } from '../src/playlists.js';
 
 const base = 'https://video.example/media/master.m3u8';
@@ -19,6 +19,26 @@ test('groups duplicate URLs and keeps the full media hint', () => {
     [{ url: base, kind: 'hls', bytes: 100, fileTitle: '真实媒体标题' }],
     [{ url: base, kind: 'fragment', bytes: 40 }],
   ), [{ url: base, kind: 'hls', bytes: 100, site: undefined, title: undefined, fileTitle: '真实媒体标题' }]);
+});
+
+test('repeated media headers preserve the stored list unless they change candidate data', () => {
+  const file = { url: 'https://v.example/video', kind: 'file', mime: 'video/mp4', bytes: 900, fileTitle: '视频标题' };
+  const entries = captureCandidate([], file);
+  assert.equal(captureCandidate(entries, file), entries);
+  assert.equal(captureCandidate(entries, { ...file, bytes: 0, fileTitle: '' }), entries);
+  assert.equal(captureCandidate(entries, { ...file, kind: 'fragment' }), entries);
+  const updated = captureCandidate(entries, { ...file, mime: 'video/webm', bytes: 920 });
+  assert.deepEqual(updated, combineCandidates(entries, [{ ...file, mime: 'video/webm', bytes: 920 }]));
+});
+
+test('keeps fragments until the capture limit and still promotes higher-ranked candidates', () => {
+  const fragment = index => ({ url: `https://v.example/${index}`, kind: 'fragment', mime: 'video/mp4' });
+  const entries = Array.from({ length: 100 }, (_, index) => fragment(index)).reduce(captureCandidate, []);
+  assert.equal(entries.length, 100);
+  assert.equal(captureCandidate(entries, fragment(100)), entries);
+  for (const file of [{ ...fragment(4), kind: 'file' }, { ...fragment(100), kind: 'file' }]) {
+    assert.deepEqual(captureCandidate(entries, file), combineCandidates(entries, [file]).slice(0, 100));
+  }
 });
 
 test('HLS picks the default audio group, distinguishes live and rejects encrypted input', () => {

@@ -34,13 +34,29 @@ export function classify({ url, mime = '', ranged = false, player = false }) {
   return null;
 }
 
+const candidateRank = { fragment: 0, file: 1, hls: 2, dash: 2, files: 3, tracks: 3 };
+const captureLimit = 100;
+
+export function captureCandidate(entries, candidate) {
+  const old = entries.find(entry => (entry.id ?? entry.url) === candidate.url);
+  if (old) {
+    if (candidateRank[old.kind] > candidateRank[candidate.kind]) return entries;
+    if (old.kind === candidate.kind && old.mime === candidate.mime
+        && (!candidate.bytes || old.bytes === candidate.bytes)
+        && (!candidate.fileTitle || old.fileTitle === candidate.fileTitle)) return entries;
+  } else if (entries.length === captureLimit && candidateRank[entries.at(-1).kind] >= candidateRank[candidate.kind]) {
+    // Equal-rank arrivals follow existing entries and fall outside the retained list.
+    return entries;
+  }
+  return combineCandidates(entries, [candidate]).slice(0, captureLimit);
+}
+
 export function combineCandidates(...lists) {
   const candidates = new Map();
-  const rank = { fragment: 0, file: 1, hls: 2, dash: 2, files: 3, tracks: 3 };
   for (const item of lists.flat()) {
     const key = item.id ?? item.url;
     const old = candidates.get(key);
-    if (old && rank[old.kind] > rank[item.kind]) continue;
+    if (old && candidateRank[old.kind] > candidateRank[item.kind]) continue;
     candidates.set(key, {
       ...old, ...item, bytes: item.bytes || old?.bytes || 0,
       site: item.site || old?.site,
@@ -48,7 +64,7 @@ export function combineCandidates(...lists) {
       fileTitle: item.fileTitle || old?.fileTitle,
     });
   }
-  return [...candidates.values()].sort((a, b) => rank[b.kind] - rank[a.kind]);
+  return [...candidates.values()].sort((a, b) => candidateRank[b.kind] - candidateRank[a.kind]);
 }
 
 export function cleanTitle(value) {

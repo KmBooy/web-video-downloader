@@ -1,5 +1,8 @@
-export function scanYouTube({ url, result, clip }) {
-  const player = document.querySelector('#movie_player');
+export function scanYouTube({ url, players, result, clip }) {
+  const isShort = url.pathname.startsWith('/shorts/');
+  const player = (isShort && (document.querySelector('#shorts-player')
+    || document.querySelector('ytd-reel-video-renderer[is-active] #movie_player')))
+    || document.querySelector('#movie_player');
   const id = (url.pathname === '/watch' ? url.searchParams.get('v') : null)
     ?? url.pathname.match(/^\/shorts\/([^/]+)/)?.[1];
   if (!id) return result;
@@ -8,7 +11,8 @@ export function scanYouTube({ url, result, clip }) {
     result.hint = 'YouTube 正在播放广告，正片开始后会重新识别。';
     return result;
   }
-  const response = player?.getPlayerResponse?.() ?? window.ytInitialPlayerResponse;
+  const liveResponse = player?.getPlayerResponse?.();
+  const response = liveResponse?.videoDetails?.videoId === id ? liveResponse : window.ytInitialPlayerResponse;
   if (response?.videoDetails?.videoId === id) {
     const data = response.streamingData;
     result.files = (data?.formats ?? []).filter(entry => entry.url).map(clip);
@@ -22,6 +26,15 @@ export function scanYouTube({ url, result, clip }) {
     const duration = Number(response.videoDetails.lengthSeconds);
     if (response.playabilityStatus?.status === 'OK' && data?.serverAbrStreamingUrl && config && duration > 0
         && !response.videoDetails.isLive && !response.videoDetails.isLiveContent && !response.videoDetails.isPostLiveDvr) {
+      // Shorts can render the playing video outside the legacy #movie_player.
+      if (isShort && !players.some(video => {
+        if (video.readyState < 2) return false;
+        const { top, bottom, left, right } = video.getBoundingClientRect();
+        return bottom > 0 && top < window.innerHeight && right > 0 && left < window.innerWidth;
+      })) {
+        result.hint = '请先在网页播放当前 Shorts，开始播放后会重新识别。';
+        return;
+      }
       const formats = (data.adaptiveFormats ?? []).filter(item =>
         !item.drmFamilies?.length && !item.licenseInfos?.length && item.itag && /^(?:video|audio)\/(?:mp4|webm)\b/.test(item.mimeType ?? ''))
         .map(({ itag, width, height, mimeType, lastModified, xtags, bitrate, contentLength,

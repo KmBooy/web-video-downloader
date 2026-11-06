@@ -19,6 +19,7 @@ await build({
   bundle: true,
   format: 'esm',
   target: 'chrome120',
+  minify: true,
   legalComments: 'linked',
   plugins: [{
     name: 'standalone-scanner',
@@ -31,8 +32,8 @@ await build({
     },
   }],
 });
-for (const file of ['manifest.json', 'popup.html', 'download.html', 'options.html', 'style.css', 'player-events.js']) {
-  await cp('src/' + file, 'dist/' + file);
+for (const asset of ['manifest.json', 'popup.html', 'download.html', 'options.html', 'style.css', 'player-events.js', 'icons']) {
+  await cp('src/' + asset, 'dist/' + asset, { recursive: true });
 }
 
 await mkdir('dist/licenses', { recursive: true });

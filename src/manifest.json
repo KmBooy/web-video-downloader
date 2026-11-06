@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "网页视频下载器",
   "description": "识别当前标签页的完整视频、HLS 和 DASH，并在浏览器内保存。",
-  "version": "0.2.13",
+  "version": "0.2.16",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAljEG9eoC/7efdb4AFr0q4gGTmMdCJ5x03c6D4/BPASXSELUFM59pnpaDlrcDB/QFAVr443GdsBiy1jFvhL3jn/F+aqOqTtrTUyqMPcs5tmBtryn4K79evCtd0nOJFhKqFAAF9oBPDPraBjAchLOmH727hYi+IVLJZrV4KRmdB0d/bsshVKYxmXZAcZxtAOoHnQZT+Zh96yINVhNptpnjt0UCZb9ZfzHA83RKDFHfPzndDSdZjYyga7sHRYXCJXATqE75m+uNEm3SmLfTnncVLUjySabJ9oj2AfEO56D80cWJ0OpVL0ZFN9tWMZq3ggm7SCspCbZ0GWQbjHbxCHRs6wIDAQAB",
   "minimum_chrome_version": "120",
   "permissions": ["activeTab", "scripting", "storage", "webRequest", "webNavigation", "offscreen", "downloads", "declarativeNetRequestWithHostAccess"],
@@ -10,5 +10,10 @@
   "content_scripts": [{"matches": ["https://*/*", "http://*/*"], "js": ["player-events.js"], "all_frames": true, "run_at": "document_start"}],
   "options_page": "options.html",
   "background": {"service_worker": "background.js", "type": "module"},
-  "action": {"default_popup": "popup.html", "default_title": "网页视频下载器"}
+  "icons": {"16": "icons/16.png", "32": "icons/32.png", "48": "icons/48.png", "128": "icons/128.png"},
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "网页视频下载器",
+    "default_icon": {"16": "icons/16.png", "32": "icons/32.png"}
+  }
 }

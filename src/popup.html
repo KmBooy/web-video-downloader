@@ -9,13 +9,16 @@
       <button id="settings">设置</button>
     </div>
   </header>
-  <section id="download-job" aria-label="下载状态" hidden>
-    <div id="job-title" class="media-title"></div>
-    <p id="job-message" role="status"></p>
-    <progress id="job-progress" aria-label="下载进度" hidden></progress>
-    <button id="cancel-job" hidden>取消下载</button>
-  </section>
   <p id="state" role="status">正在读取当前网页…</p>
   <section id="media" aria-label="媒体资源"></section>
+  <section id="download-jobs" aria-label="下载任务" hidden></section>
+  <template id="job-template">
+    <div class="job">
+      <div class="media-title"></div>
+      <p class="job-message" role="status"></p>
+      <progress aria-label="下载进度" hidden></progress>
+      <button type="button" hidden>取消下载</button>
+    </div>
+  </template>
   <script type="module" src="popup.js"></script>
 </body></html>

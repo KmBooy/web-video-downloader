@@ -12,7 +12,8 @@ export async function stageYouTube(candidate, scratch, signal, report, maxHeight
   }));
   const audio = formats.filter(format => format.hasAudio)
     .sort((a, b) => Number(b.isOriginal) - Number(a.isOriginal) || b.bitrate - a.bitrate)[0];
-  const aac = formats.find(format => format.itag === 140) ?? formats.find(format => format.hasAudio && /^audio\/mp4\b/.test(format.mimeType));
+  const aac = formats.find(format => format.itag === 140 && !format.xtags)
+    ?? formats.find(format => format.hasAudio && /^audio\/mp4\b/.test(format.mimeType));
   const best = selectQuality(videos, maxHeight);
   const compatible = selectQuality(videos.filter(item => /codecs="avc1/.test(item.format.mimeType)), maxHeight);
   const baseline = selectQuality(videos.filter(item => item.format.itag === 134), maxHeight);
@@ -22,7 +23,7 @@ export async function stageYouTube(candidate, scratch, signal, report, maxHeight
   const tried = new Set();
   for (const [item, track] of [[best, audio], [compatible, aac], [baseline, aac]]) {
     if (!item || !track) continue;
-    const key = item.format.itag + ':' + track.itag;
+    const key = JSON.stringify([item.format.itag, item.format.xtags, track.itag, track.xtags]);
     if (tried.has(key)) continue;
     tried.add(key);
     try {
@@ -34,7 +35,9 @@ export async function stageYouTube(candidate, scratch, signal, report, maxHeight
       failure = error;
     }
   }
-  throw new Error('YouTube 拒绝了这条视频的可用音视频轨。', { cause: failure });
+  throw new Error(failure?.reloadRequested
+    ? 'YouTube 要求更新播放会话。请确认当前视频能正常播放，刷新后再试。'
+    : 'YouTube 拒绝了这条视频的可用音视频轨。', { cause: failure });
 }
 
 async function readTracks(candidate, formats, video, audio, scratch, signal, report, maximum) {
@@ -109,8 +112,10 @@ async function readTracks(candidate, formats, video, audio, scratch, signal, rep
     if (failure && /403|proof.of.origin|expired/i.test(failure.message)) {
       throw new Error('YouTube 拒绝了当前播放地址。请刷新页面并播放正片后重试。');
     }
-    if (!bytes && /sabr\.no_(?:video|audio)_selected/i.test((failure ?? error).message)) {
-      throw Object.assign(new Error('YouTube 拒绝了当前画质的音视频组合。'), { retryFormat: true });
+    const cause = failure ?? error;
+    const reloadRequested = /streaming data reload requested/i.test(cause.message);
+    if (!bytes && (reloadRequested || /sabr\.no_(?:video|audio)_selected/i.test(cause.message))) {
+      throw Object.assign(new Error('YouTube 拒绝了当前画质的音视频组合。', { cause }), { retryFormat: true, reloadRequested });
     }
     throw failure ?? error;
   } finally {
