@@ -38,11 +38,14 @@ function pageState(page, documentId, since, resourceSince = 0) {
   return { page, documentId, since, resourceSince, epoch: crypto.randomUUID(), entries: [] };
 }
 
-function navigate({ tabId, frameId, url, timeStamp, documentId }, sameDocument) {
+function navigate({ tabId, frameId, url, timeStamp, documentId, transitionType }, sameDocument) {
   if (frameId !== 0) return;
+  const page = pageKey(url);
+  if (!sameDocument && transitionType === 'reload' && page) {
+    void serialize(jobLock, () => clearFinishedJobs(tabId, page)).catch(() => {});
+  }
   void serialize(tabId, async () => {
     const previous = await tabState(tabId);
-    const page = pageKey(url);
     if (page) {
       if (previous?.page === page && previous.documentId === documentId && sameDocument) return;
       const state = pageState(page, documentId, timeStamp, sameDocument ? timeStamp : 0);
@@ -63,6 +66,7 @@ chrome.webNavigation.onHistoryStateUpdated.addListener(details => navigate(detai
 chrome.webNavigation.onReferenceFragmentUpdated.addListener(details => navigate(details, true));
 chrome.tabs.onRemoved.addListener(id => {
   void serialize(id, () => chrome.storage.session.remove([tabKey(id), playbackKey(id)])).catch(() => {});
+  void serialize(jobLock, () => clearFinishedJobs(id)).catch(() => {});
 });
 
 function onMediaHeaders(details) {
@@ -209,6 +213,12 @@ const isActiveJob = job => job.state === 'queued' || job.state === 'running';
 
 async function getJobs() {
   return (await chrome.storage.session.get(jobsKey))[jobsKey] ?? [];
+}
+
+async function clearFinishedJobs(tabId, page) {
+  const jobs = await getJobs();
+  const kept = jobs.filter(job => job.tabId !== tabId || (page && job.page !== page) || isActiveJob(job));
+  if (kept.length !== jobs.length) await chrome.storage.session.set({ [jobsKey]: kept });
 }
 
 chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {

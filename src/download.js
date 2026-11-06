@@ -34,6 +34,7 @@ async function choose(candidate, maxHeight, signal) {
     choices = candidate.kind === 'hls' ? hlsManifest(text, url).map(item => ({
       height: item.height, bitrate: item.bitrate, duration: item.duration, hls: true,
       video: { url: item.videoUrl }, audio: item.audioUrl ? { url: item.audioUrl } : undefined,
+      videoOnly: candidate.site === 'x' && item.videoOnly,
     })) : dashManifest(text, url);
   }
 
@@ -223,7 +224,7 @@ async function writeVideo(job, signal) {
         });
       await writable.truncate(bytes);
     } else {
-      report(youtube ? '正在合并音视频' : '正在下载并合并音视频' + height);
+      report(youtube ? '正在合并音视频' : (mux.hasAudio ? '正在下载并合并音视频' : '正在下载视频') + height);
       await mux.write(guarded);
     }
     signal.throwIfAborted();

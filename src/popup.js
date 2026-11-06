@@ -1,7 +1,8 @@
 const $ = id => document.getElementById(id);
 const labels = { file: '完整文件', hls: 'HLS 清单', dash: 'DASH 清单', tracks: '分离音视频', files: '完整文件',
   'youtube-sabr': 'YouTube · 合并音视频' };
-const jobLabels = { queued: '等待下载…', running: '正在下载…', saved: '已保存。', failed: '下载失败。', cancelled: '已取消。' };
+const jobLabels = { queued: '下载中', running: '下载中', saved: '已保存', failed: '下载失败', cancelled: '已取消' };
+const titleSegmenter = new Intl.Segmenter();
 let currentTab;
 let currentPage;
 let scheduledRefresh;
@@ -20,23 +21,28 @@ async function call(type, args = {}) {
 const isActive = job => job.state === 'queued' || job.state === 'running';
 const selectionKey = (tabId, page, selection) => JSON.stringify([tabId, page, selection]);
 
+function displayTitle(name) {
+  const characters = Array.from(titleSegmenter.segment(name), item => item.segment);
+  return characters.length > 30 ? characters.slice(0, 29).join('') + '…' : name;
+}
+
 function syncJobs() {
-  const activeSelections = new Set(jobs.filter(job => isActive(job) && job.tabId === currentTab && job.page === currentPage)
-    .map(job => job.selection));
+  const pageJobs = jobs.filter(job => job.tabId === currentTab && job.page === currentPage);
+  const activeSelections = new Set(pageJobs.filter(isActive).map(job => job.selection));
   for (const button of $('media').children) {
     button.disabled = activeSelections.has(button.dataset.selection)
       || starting.has(selectionKey(currentTab, currentPage, button.dataset.selection));
   }
 
   const list = $('download-jobs');
-  list.hidden = !jobs.length;
-  const ids = new Set(jobs.map(job => job.id));
+  list.hidden = !pageJobs.length;
+  const ids = new Set(pageJobs.map(job => job.id));
   for (const [id, row] of jobRows) {
     if (ids.has(id)) continue;
     row.remove();
     jobRows.delete(id);
   }
-  for (const [index, job] of jobs.entries()) {
+  for (const [index, job] of pageJobs.entries()) {
     let row = jobRows.get(job.id);
     if (!row) {
       row = $('job-template').content.firstElementChild.cloneNode(true);
@@ -44,15 +50,19 @@ function syncJobs() {
       row.querySelector('button').addEventListener('click', () => { void cancel(job.id); });
       jobRows.set(job.id, row);
     }
-    const [title, status, progress, button] = row.children;
+    const [title, actions, progress] = row.children;
+    const [status, button] = actions.children;
     const active = isActive(job);
     const name = job.title || '网页视频';
-    if (title.textContent !== name) title.textContent = name;
-    const message = job.message || jobLabels[job.state] || '';
+    if (title.title !== name) {
+      title.title = name;
+      title.textContent = displayTitle(name);
+    }
     const speed = active && job.bytesPerSecond > 0
       ? ' · ' + (job.bytesPerSecond / 1048576).toFixed(2) + ' MiB/s' : '';
-    const label = cancelling.has(job.id) && active ? '正在取消…' : message + speed;
+    const label = cancelling.has(job.id) && active ? '取消中' : jobLabels[job.state] || '';
     if (status.textContent !== label) status.textContent = label;
+    status.title = (job.message || label) + speed;
     button.hidden = !active;
     button.disabled = cancelling.has(job.id);
     button.setAttribute('aria-label', '取消下载 ' + name);
@@ -76,7 +86,7 @@ async function start(result, entry, tabId) {
       tabId, page: result.page, epoch: result.epoch, selection, title: entry.title,
     });
   } catch (error) {
-    $('state').textContent = error.message;
+    if (currentTab === tabId && currentPage === result.page) $('state').textContent = error.message;
   } finally {
     starting.delete(key);
     syncJobs();
@@ -130,7 +140,8 @@ async function refresh(quiet = false) {
       const host = entry.url ? new URL(entry.url).hostname : '';
       const label = entry.site === 'douyin-replay' ? '直播回放 · 合并音视频'
         : entry.site === 'douyin-video' ? '普通抖音视频 · 直接下载' : labels[entry.kind];
-      button.firstElementChild.textContent = entry.title;
+      button.firstElementChild.textContent = displayTitle(entry.title);
+      button.firstElementChild.title = entry.title;
       const size = entry.bytes > 0 ? (entry.bytes / (1024 * 1024)).toFixed(1) + ' MiB' : '';
       button.lastElementChild.textContent = [label, sizes.join(' / '), size, host].filter(Boolean).join(' · ');
       button.onclick = () => { void start(result, entry, tab.id); };
@@ -156,7 +167,7 @@ async function cancel(id) {
   try { await call('cancel', { id }); }
   catch (error) {
     cancelling.delete(id);
-    $('state').textContent = error.message;
+    if (jobRows.has(id)) $('state').textContent = error.message;
     syncJobs();
   }
 }

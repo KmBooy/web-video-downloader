@@ -15,9 +15,11 @@
   <template id="job-template">
     <div class="job">
       <div class="media-title"></div>
-      <p class="job-message" role="status"></p>
+      <div class="job-actions">
+        <span class="job-message" role="status"></span>
+        <button type="button" hidden>×</button>
+      </div>
       <progress aria-label="下载进度" hidden></progress>
-      <button type="button" hidden>取消下载</button>
     </div>
   </template>
   <script type="module" src="popup.js"></script>

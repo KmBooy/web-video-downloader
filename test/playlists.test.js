@@ -55,6 +55,16 @@ test('HLS picks the default audio group, distinguishes live and rejects encrypte
   assert.throws(() => hlsChildren(media.replace('#EXTINF', '#EXT-X-KEY:METHOD=AES-128,URI="key"\n#EXTINF'), base), /加密/);
 });
 
+test('only a variant explicitly declaring AVC without an audio group can be treated as video-only', () => {
+  const master = attributes => '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=200000,' + attributes + '\nvideo.m3u8\n';
+  assert.equal(hlsManifest(master('CODECS="avc1.64001f"'), base)[0].videoOnly, true);
+  for (const attributes of [
+    'RESOLUTION=720x910',
+    'CODECS="avc1.64001f,mp4a.40.2"',
+    'CODECS="avc1.64001f",AUDIO="a"',
+  ]) assert.equal(hlsManifest(master(attributes), base)[0].videoOnly, false);
+});
+
 test('DASH distinguishes dynamic and protected manifests before parsing', () => {
   assert.throws(() => dashManifest('<MPD type="dynamic"></MPD>', base), /正在播/);
   assert.throws(() => dashManifest('<MPD><ContentProtection/></MPD>', base), /内容保护/);

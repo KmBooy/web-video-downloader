@@ -40,6 +40,7 @@ export function hlsManifest(text, base) {
         label: quality(item.attributes?.RESOLUTION?.height, item.attributes?.BANDWIDTH, index),
         videoUrl: resolve(item.uri, base),
         audioUrl: audio?.uri ? resolve(audio.uri, base) : undefined,
+        videoOnly: !item.attributes?.AUDIO && /^avc[13]\.[\da-f]+$/i.test(item.attributes?.CODECS ?? ''),
         bitrate: item.attributes?.BANDWIDTH || 0,
         height: item.attributes?.RESOLUTION?.height,
       };

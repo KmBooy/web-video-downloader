@@ -20,8 +20,12 @@ progress { width: 100%; margin-top: 14px; }
 
 .toolbar-actions { display: flex; gap: 6px; flex-shrink: 0; }
 #download-jobs { margin-top: 12px; max-height: 230px; overflow: auto; }
-.job { border-top: 1px solid var(--muted); padding: 8px 0; overflow-wrap: anywhere; }
-.job-message { margin: 4px 0; }
+.job { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 4px 12px;
+  border-top: 1px solid var(--muted); padding: 8px 0; overflow-wrap: anywhere; }
+.job-actions { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+.job-message { color: var(--muted); font-size: 12px; }
+.job-actions button { padding: 0; width: 24px; height: 24px; margin: 0; font-size: 17px; line-height: 1; }
+.job progress { grid-column: 1 / -1; margin: 0; height: 6px; }
 .download section, .download fieldset { margin: 18px 0; }
 .download input, .download select { font: inherit; }
 

@@ -115,7 +115,7 @@ export function titleCandidates(entries, pageTitle) {
 }
 
 export function safeFilename(title) {
-  const name = cleanTitle(title).replace(/\.(?:mp4|webm|mov|m4v|ogv|mkv)$/i, '')
+  const name = cleanTitle(title).replace(/\p{Cf}/gu, '').replace(/\.(?:mp4|webm|mov|m4v|ogv|mkv)$/i, '')
     .replace(/[<>:"/\\|?*]/g, '_').replace(/^[. ]+|[. ]+$/g, '') || '网页视频';
   const encoder = new TextEncoder();
   const ordinal = name.match(/ · \d+$/)?.[0] ?? '';

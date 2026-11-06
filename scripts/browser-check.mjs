@@ -15,6 +15,7 @@ const dist = path.join(scratch, 'dist');
 const ffmpeg = args => execFileSync('ffmpeg', ['-nostdin', '-loglevel', 'error', '-y', ...args], { stdio: 'inherit' });
 let browser;
 let server;
+const longXTitle = 'X 第一条，' + '👩‍💻内容与标点，'.repeat(5) + '结尾';
 const reads = new Set();
 const biliVideoRequests = new Set();
 
@@ -49,6 +50,10 @@ try {
   const hls = ['-c', 'copy', '-f', 'hls', '-hls_time', '2', '-hls_playlist_type', 'vod'];
   ffmpeg(['-i', input, '-an', ...hls, path.join(media, 'split-video.m3u8')]);
   ffmpeg(['-i', input, '-vn', ...hls, path.join(media, 'split-audio.m3u8')]);
+  ffmpeg(['-i', input, '-an', ...hls, '-hls_segment_type', 'fmp4', '-hls_fmp4_init_filename', 'x-silent-init.mp4',
+    path.join(media, 'x-silent.m3u8')]);
+  await writeFile(path.join(media, 'x-silent-master.m3u8'),
+    '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=150000,RESOLUTION=160x90,CODECS="avc1.42c00a"\nx-silent.m3u8\n');
   await writeFile(path.join(media, 'split.m3u8'), [
     '#EXTM3U',
     '#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="main",DEFAULT=YES,URI="split-audio.m3u8"',
@@ -69,7 +74,7 @@ try {
     if (req.method === 'GET' && url.pathname === '/replay.m3u8') replayManifestRequests++;
     if (url.pathname === '/fixture/status/111') {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-      res.end('<title>X 测试</title><article><div data-testid="tweetText">X 第一条</div>' +
+      res.end('<title>X 测试</title><article><div data-testid="tweetText">' + longXTitle + '</div>' +
         '<a href="/fixture/status/111">帖子</a>' +
         '<video poster="https://pbs.twimg.com/ext_tw_video_thumb/111/pu/img/a.jpg"></video></article>');
       return;
@@ -153,7 +158,8 @@ try {
   await session.send('Browser.setDownloadBehavior', { behavior: 'default' });
   async function popupFor(mode) {
     await videoPage.bringToFront();
-    await videoPage.goto(origin + '/page?mode=' + mode);
+    const url = origin + '/page?mode=' + mode;
+    if (videoPage.url() !== url) await videoPage.goto(url);
     if (!['opaque', 'missing'].includes(mode)) {
       await videoPage.waitForFunction(value => performance.getEntriesByType('resource')
         .some(entry => new URL(entry.name).pathname.endsWith('/' + value)), mode === 'direct' ? 'direct.mp4' : mode);
@@ -166,10 +172,18 @@ try {
 
   async function status(page, selector, expression, timeout = 45000) {
     try {
-      await page.waitForFunction(({ selector, expression }) =>
-        new RegExp(expression).test(document.querySelector(selector)?.textContent), { selector, expression }, { timeout });
-    } catch {
-      throw new Error('Expected ' + expression + '; got ' + JSON.stringify(await page.locator(selector).allTextContents()));
+      const outcome = await page.waitForFunction(({ selector, expression }) => {
+        const element = document.querySelector(selector);
+        if (!element) return false;
+        const messages = [element.textContent, element.title];
+        if (messages.some(text => new RegExp(expression).test(text))) return { matches: true };
+        if (expression.startsWith('已保存') && element.textContent === '下载失败') return { messages };
+        return false;
+      }, { selector, expression }, { timeout });
+      const { matches, messages } = await outcome.jsonValue();
+      assert.ok(matches, JSON.stringify(messages));
+    } catch (error) {
+      throw new Error('Expected ' + expression + '; got ' + JSON.stringify(await page.locator(selector).allTextContents()), { cause: error });
     }
   }
 
@@ -197,6 +211,14 @@ try {
 
   async function files() {
     return worker.evaluate(() => chrome.downloads.search({ state: 'complete' }));
+  }
+
+  async function jobState(selector) {
+    const id = selector.split('"')[1];
+    return worker.evaluate(async id => {
+      const jobs = (await chrome.storage.session.get('download-jobs'))['download-jobs'];
+      return jobs?.find(job => job.id === id)?.state;
+    }, id);
   }
 
   async function saveToNas(name, seconds, hasAudio = true) {
@@ -257,6 +279,7 @@ try {
   const limited = await popupFor('replay.m3u8');
   await start(limited, /HLS 清单/);
   await status(limited, '.job:first-child .job-message', '超出设置的 1 MiB 上限');
+  assert.equal(await limited.locator('.job:first-child .job-message').innerText(), '下载失败');
   assert.equal((await files()).length, 2);
   await limited.close();
   await maxSize(0);
@@ -313,9 +336,21 @@ try {
 
   const cancel = await popupFor('replay.m3u8');
   delaySegments = true;
-  await start(cancel, /HLS 清单/);
-  await cancel.locator('.job:first-child button').click();
-  await status(cancel, '.job:first-child .job-message', '已取消');
+  await cancel.locator('.job').first().waitFor();
+  assert.deepEqual((await cancel.locator('.job-message').allTextContents()).sort(), ['下载失败', '已保存']);
+  const running = await start(cancel, /HLS 清单/);
+  await videoPage.reload();
+  await cancel.waitForFunction(selector => {
+    const rows = document.querySelectorAll('.job');
+    return rows.length === 1 && rows[0].matches(selector) && rows[0].querySelector('.job-message').textContent === '下载中';
+  }, running);
+  const closeButton = cancel.getByRole('button', { name: /取消下载/ });
+  assert.equal(await closeButton.innerText(), '×');
+  await closeButton.click();
+  await status(cancel, running + ' .job-message', '已取消');
+  await videoPage.reload();
+  await cancel.getByRole('button', { name: /HLS 清单/ }).waitFor();
+  await cancel.locator('.job').waitFor({ state: 'detached' });
   assert.equal((await files()).length, 6);
   await cancel.close();
   delaySegments = false;
@@ -395,16 +430,26 @@ try {
   await getPlaylist(cdn + '/ext_tw_video/111/pl/replay.m3u8');
   const firstX = await start(xPopup, /X 第一条.*HLS 清单/);
   await status(xPopup, firstX + ' .job-message', '合并音视频');
+  for (const title of ['#media .media-title', firstX + ' .media-title']) {
+    const visible = await xPopup.locator(title).first().innerText();
+    assert.equal([...new Intl.Segmenter().segment(visible)].length, 30);
+    assert.ok(visible.endsWith('…'));
+    assert.equal(await xPopup.locator(title).first().getAttribute('title'), longXTitle);
+  }
+  const titleBox = await xPopup.locator(firstX + ' .media-title').boundingBox();
+  const statusBox = await xPopup.locator(firstX + ' .job-message').boundingBox();
+  assert.ok(statusBox.x >= titleBox.x + titleBox.width);
   await videoPage.evaluate(() => {
     history.pushState(null, '', '/fixture/status/222');
     document.querySelector('article').innerHTML =
       '<div data-testid="tweetText">X 第二条</div><a href="/fixture/status/222">帖子</a>' +
       '<video poster="https://pbs.twimg.com/ext_tw_video_thumb/222/pu/img/b.jpg"></video>';
   });
-  await getPlaylist(cdn + '/ext_tw_video/222/pl/split.m3u8');
+  await getPlaylist(cdn + '/ext_tw_video/222/pl/x-silent-master.m3u8');
   const secondX = await start(xPopup, /X 第二条.*HLS 清单/);
   await status(xPopup, secondX + ' .job-message', '已保存');
-  assert.equal(await xPopup.locator(firstX + ' button').isVisible(), true, 'first X job ended before the second saved');
+  assert.equal(await xPopup.locator(firstX).count(), 0, 'previous page job leaked into current page');
+  assert.equal(await jobState(firstX), 'running', 'first X job ended before the second saved');
 
   const biliPage = await browser.newPage();
   await openBili(biliPage);
@@ -422,8 +467,8 @@ try {
   await videoPage.goto(note);
   await videoPage.bringToFront();
   const noteJob = await start(xPopup, /小红书视频.*完整文件/);
-  await status(xPopup, biliJob + ' .job-message', '已保存');
   await status(xPopup, noteJob + ' .job-message', '已保存');
+  assert.equal(await xPopup.locator(biliJob).count(), 0, 'another tab job leaked into current page');
   await biliPage.close();
 
   await videoPage.goto(origin + '/page?mode=replay.m3u8');
@@ -431,15 +476,16 @@ try {
   await status(xPopup, discard + ' .job-message', '合并音视频');
   await xPopup.locator(discard + ' button').click();
   await status(xPopup, discard + ' .job-message', '已取消');
-  assert.equal(await xPopup.locator(firstX + ' button').isVisible(), true, 'cancel also stopped the first X job');
+  assert.equal(await jobState(firstX), 'running', 'cancel also stopped the first X job');
   await xPopup.close();
   const reopenedJobs = await browser.newPage();
+  await videoPage.goto(xPost + '111');
   await videoPage.bringToFront();
   await reopenedJobs.goto(prefix + 'popup.html');
   await status(reopenedJobs, firstX + ' .job-message', '已保存', 120000);
   const completed = await files();
   for (const [name, seconds, audio] of [
-    ['X 第一条.mp4', 720, true], ['X 第二条.mp4', 6, true],
+    [longXTitle.replaceAll('\u200d', '') + '.mp4', 720, true], ['X 第二条.mp4', 6, false],
     ['B 站分离轨测试.mp4', 6, true], ['小红书视频.mp4', 6, false],
   ]) {
     const saved = completed.find(item => item.filename === path.join(changedDirectory, name));
