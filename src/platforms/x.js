@@ -1,6 +1,6 @@
 export const xHosts = ['x.com', 'www.x.com', 'twitter.com', 'www.twitter.com'];
 
-function thumbnailId(value) {
+export function thumbnailId(value) {
   if (!value) return;
   try {
     const url = new URL(value, location.href);
@@ -43,7 +43,7 @@ export function scanX({ url, players, result }) {
   result.hint = '请播放网页里的 X 视频，扩展会列出播放器加载的完整视频或主清单。';
 }
 
-function xMedia(entry) {
+export function xMedia(entry) {
   if (!entry.url || !['hls', 'file'].includes(entry.kind)) return;
   const url = new URL(entry.url);
   if (url.hostname !== 'video.twimg.com') return;

@@ -3,6 +3,7 @@ import { scanBilibili } from './platforms/bilibili.js';
 import { scanX, xHosts } from './platforms/x.js';
 import { scanXiaohongshu } from './platforms/xiaohongshu.js';
 import { scanYouTube } from './platforms/youtube.js';
+import { scanInstagram } from './platforms/instagram.js';
 
 const scanners = new Map([
   ...douyinHosts.map(host => [host, scanDouyin]),
@@ -11,9 +12,11 @@ const scanners = new Map([
   ['www.xiaohongshu.com', scanXiaohongshu],
   ['www.youtube.com', scanYouTube],
   ['m.youtube.com', scanYouTube],
+  ['www.instagram.com', scanInstagram],
+  ['instagram.com', scanInstagram],
 ]);
 
-export async function scanPage(resourceSince, downloadPostId) {
+export async function scanPage(resourceSince, downloadPostId, contextTarget) {
   const url = new URL(location.href);
   const videoTitle = video => {
     const label = video.getAttribute?.('title') || video.getAttribute?.('aria-label');
@@ -50,7 +53,7 @@ export async function scanPage(resourceSince, downloadPostId) {
     id: entry.id ?? entry.itag,
   });
 
-  await scanners.get(url.hostname)?.({ url, players, videos, recent, resources, resourceSince, result, clip });
+  await scanners.get(url.hostname)?.({ url, players, videos, recent, resources, resourceSince, result, clip, downloadPostId, contextTarget });
   if (downloadPostId && douyinHosts.includes(url.hostname)) {
     await refreshDouyinFiles(result, downloadPostId, url);
     const active = document.querySelector('[data-e2e="feed-active-video"]');

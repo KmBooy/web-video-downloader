@@ -44,6 +44,7 @@ try {
   videoFixture('replay.m3u8', 720, ['-f', 'hls', '-hls_time', '4', '-hls_playlist_type', 'vod']);
   videoFixture('separated.mpd', 6, ['-f', 'dash', '-seg_duration', '2']);
   const input = path.join(media, 'direct.mp4');
+  await cp(input, path.join(media, 'instagram-complete.mp4'));
   ffmpeg(['-i', input, '-an', '-c', 'copy', '-movflags', '+faststart', path.join(media, 'silent.mp4')]);
   ffmpeg(['-i', input, '-an', '-c', 'copy', path.join(media, 'replay-video.mp4')]);
   ffmpeg(['-i', input, '-vn', '-c', 'copy', path.join(media, 'replay-audio.mp4')]);
@@ -183,7 +184,11 @@ try {
       const { matches, messages } = await outcome.jsonValue();
       assert.ok(matches, JSON.stringify(messages));
     } catch (error) {
-      throw new Error('Expected ' + expression + '; got ' + JSON.stringify(await page.locator(selector).allTextContents()), { cause: error });
+      throw new Error('Expected ' + expression + ' at ' + selector + '; got ' + JSON.stringify({
+        values: await page.locator(selector).allTextContents(),
+        state: await page.locator('#state').textContent().catch(() => null),
+        rows: await page.locator('.job').evaluateAll(rows => rows.map(row => [row.dataset.jobId, row.textContent])),
+      }), { cause: error });
     }
   }
 
@@ -231,12 +236,35 @@ try {
 
   async function start(popup, label) {
     const tabsBefore = browser.pages().length;
-    const previous = await popup.locator('.job').evaluateAll(rows => rows.map(row => row.dataset.jobId));
-    await popup.getByRole('button', { name: label }).click();
+    const previous = await worker.evaluate(async () =>
+      ((await chrome.storage.session.get('download-jobs'))['download-jobs'] ?? []).map(job => job.id));
+    const button = popup.getByRole('button', { name: label });
+    assert.equal(await button.isEnabled(), true);
+    await button.click();
     const next = await popup.waitForFunction(ids => Array.from(document.querySelectorAll('.job'))
       .find(row => !ids.includes(row.dataset.jobId))?.dataset.jobId, previous);
     assert.equal(browser.pages().length, tabsBefore, 'download opened a visible tab');
     return '.job[data-job-id="' + await next.jsonValue() + '"]';
+  }
+
+  async function capturedContext(selector) {
+    const box = await videoPage.locator(selector).boundingBox();
+    await videoPage.locator(selector).dispatchEvent('contextmenu', {
+      clientX: box.x + box.width / 2, clientY: box.y + box.height / 2, bubbles: true, composed: true, cancelable: true,
+    });
+    return worker.evaluate(async url => {
+      const [tab] = await chrome.tabs.query({ url });
+      return { tabId: tab.id, ...await chrome.tabs.sendMessage(tab.id, { type: 'get-video-context' }, { frameId: 0 }) };
+    }, videoPage.url());
+  }
+
+  async function startContext(popup, capture) {
+    assert.ok(capture.target, capture.error);
+    const response = await popup.evaluate(message => chrome.runtime.sendMessage(message), {
+      type: 'start', tabId: capture.tabId, contextTarget: capture.target,
+    });
+    assert.ok(response.data?.id, response.error);
+    return '.job[data-job-id="' + response.data.id + '"]';
   }
 
   await videoPage.goto(origin + '/page?mode=opaque');
@@ -257,10 +285,10 @@ try {
     }
   }, [...leftovers, 'media-other']);
   const direct = await popupFor('direct');
-  await start(direct, /选中视频标题.*完整文件/);
+  const directJob = await start(direct, /选中视频标题.*完整文件/);
   await direct.close();
   const reopened = await popupFor('direct');
-  await status(reopened, '.job:first-child .job-message', '已保存');
+  await status(reopened, directJob + ' .job-message', '已保存');
   await reopened.close();
   await saveToNas('选中视频标题.mp4', 6);
   assert.deepEqual(await worker.evaluate(async () => {
@@ -270,16 +298,16 @@ try {
     return names;
   }), ['media-other']);
   const repeated = await popupFor('direct');
-  await start(repeated, /选中视频标题.*完整文件/);
-  await status(repeated, '.job:first-child .job-message', '已保存.*\\(1\\)');
+  const repeatedJob = await start(repeated, /选中视频标题.*完整文件/);
+  await status(repeated, repeatedJob + ' .job-message', '已保存.*\\(1\\)');
   assert.equal((await files()).length, 2);
   await repeated.close();
 
   await maxSize(1);
   const limited = await popupFor('replay.m3u8');
-  await start(limited, /HLS 清单/);
-  await status(limited, '.job:first-child .job-message', '超出设置的 1 MiB 上限');
-  assert.equal(await limited.locator('.job:first-child .job-message').innerText(), '下载失败');
+  const limitedJob = await start(limited, /HLS 清单/);
+  await status(limited, limitedJob + ' .job-message', '超出设置的 1 MiB 上限');
+  assert.equal(await limited.locator(limitedJob + ' .job-message').innerText(), '下载失败');
   assert.equal((await files()).length, 2);
   await limited.close();
   await maxSize(0);
@@ -291,8 +319,8 @@ try {
     breakNextReplayBody = mode === 'replay.m3u8';
     const popup = await popupFor(mode);
     const beforeDownload = replayManifestRequests;
-    await start(popup, label);
-    await status(popup, '.job:first-child .job-message', '已保存', 120000);
+    const row = await start(popup, label);
+    await status(popup, row + ' .job-message', '已保存', 120000);
     const job = await worker.evaluate(async () => (await chrome.storage.session.get('download-jobs'))['download-jobs'][0]);
     await saveToNas(job.filename, duration);
     if (mode === 'replay.m3u8') {
@@ -323,15 +351,15 @@ try {
   const paired = await browser.newPage();
   await videoPage.bringToFront();
   await paired.goto(prefix + 'popup.html');
-  await start(paired, /分离音视频/);
-  await status(paired, '.job:first-child .job-message', '已保存');
+  const pairedJob = await start(paired, /分离音视频/);
+  await status(paired, pairedJob + ' .job-message', '已保存');
   await saveToNas('B 站分离轨测试.mp4', 6);
   assert.deepEqual([...biliVideoRequests], ['range', 'full']);
   await paired.close();
 
   const live = await popupFor('live.m3u8');
-  await start(live, /HLS 清单/);
-  await status(live, '.job:first-child .job-message', '正在播的 HLS 直播');
+  const liveJob = await start(live, /HLS 清单/);
+  await status(live, liveJob + ' .job-message', '正在播的 HLS 直播');
   await live.close();
 
   const cancel = await popupFor('replay.m3u8');
@@ -339,6 +367,7 @@ try {
   await cancel.locator('.job').first().waitFor();
   assert.deepEqual((await cancel.locator('.job-message').allTextContents()).sort(), ['下载失败', '已保存']);
   const running = await start(cancel, /HLS 清单/);
+  await status(cancel, running + ' .job-message', '合并音视频');
   await videoPage.reload();
   await cancel.waitForFunction(selector => {
     const rows = document.querySelectorAll('.job');
@@ -384,8 +413,8 @@ try {
   await options.goto(prefix + 'options.html');
   assert.equal((await files()).length, 6, 'native download records did not survive restart');
   const changed = await popupFor('direct');
-  await start(changed, /完整文件/);
-  await status(changed, '.job:first-child .job-message', '已保存');
+  const changedJob = await start(changed, /完整文件/);
+  await status(changed, changedJob + ' .job-message', '已保存');
   await status(options, '#last-download-path', 'changed-browser-downloads$');
   const relocated = (await files()).find(item => path.dirname(item.filename) === changedDirectory);
   assert.ok(relocated, 'browser did not use its changed default download directory');
@@ -393,8 +422,8 @@ try {
   await changed.close();
 
   const silent = await popupFor('silent.mp4');
-  await start(silent, /完整文件/);
-  await status(silent, '.job:first-child .job-message', '已保存');
+  const silentJob = await start(silent, /完整文件/);
+  await status(silent, silentJob + ' .job-message', '已保存');
   const silentFile = (await files()).find(item => item.filename.endsWith('Fixture silent.mp4'));
   assert.ok(silentFile, 'video without an audio track did not reach the native downloads manager');
   verify(silentFile.filename, 6, false);
@@ -402,16 +431,16 @@ try {
 
   await maxSize(1);
   const capped = await popupFor('direct');
-  await start(capped, /完整文件/);
-  await status(capped, '.job:first-child .job-message', '已保存');
+  const cappedJob = await start(capped, /完整文件/);
+  await status(capped, cappedJob + ' .job-message', '已保存');
   await capped.close();
   await maxSize(0);
 
   const expired = await popupFor('direct');
   await expired.locator('.media').first().waitFor();
   await rm(path.join(media, 'direct.mp4'));
-  await start(expired, /完整文件/);
-  await status(expired, '.job:first-child .job-message', '已过期');
+  const expiredJob = await start(expired, /完整文件/);
+  await status(expired, expiredJob + ' .job-message', '已过期');
   await expired.close();
   console.log('一键后台保存、关弹窗继续、大小上限、同名保护、取消与切页均通过。');
 
@@ -446,7 +475,23 @@ try {
       '<video poster="https://pbs.twimg.com/ext_tw_video_thumb/222/pu/img/b.jpg"></video>';
   });
   await getPlaylist(cdn + '/ext_tw_video/222/pl/x-silent-master.m3u8');
-  const secondX = await start(xPopup, /X 第二条.*HLS 清单/);
+  await videoPage.evaluate(() => {
+    window.websiteMenuCount = 0;
+    document.addEventListener('contextmenu', event => {
+      window.websiteMenuCount++;
+      event.preventDefault();
+    }, true);
+  });
+  const xContext = await capturedContext('article video');
+  assert.equal(xContext.target.mediaId, '222');
+  assert.equal(await videoPage.evaluate(() => window.websiteMenuCount), 0);
+  await videoPage.locator('article video').evaluate(video => {
+    video.dispatchEvent(new MouseEvent('contextmenu', {
+      bubbles: true, composed: true, cancelable: true, shiftKey: true,
+    }));
+  });
+  assert.equal(await videoPage.evaluate(() => window.websiteMenuCount), 1, 'Shift-right-click did not retain the website menu');
+  const secondX = await startContext(xPopup, xContext);
   await status(xPopup, secondX + ' .job-message', '已保存');
   assert.equal(await xPopup.locator(firstX).count(), 0, 'previous page job leaked into current page');
   assert.equal(await jobState(firstX), 'running', 'first X job ended before the second saved');
@@ -493,6 +538,86 @@ try {
     verify(saved.filename, seconds, audio);
   }
   console.log('X 同页切帖并行、B 站和小红书跨页并行、单独取消及重开弹窗通过。');
+
+  const instagram = 'https://www.instagram.com/';
+  const instagramCode = 'FixtureIG';
+  const instagramPost = {
+    code: instagramCode, pk: '1', has_audio: true, caption: { text: 'Instagram 完整视频测试' },
+    video_versions: [{ url: origin + '/expired-instagram.mp4', width: 160, height: 90 }],
+  };
+  await videoPage.route(instagram, route => route.fulfill({
+    contentType: 'text/html; charset=utf-8',
+    body: '<title>Instagram</title><article><a href="/p/' + instagramCode + '/">帖子</a>' +
+      '<video width="160" height="90" src="' + origin + '/instagram-complete.mp4"></video></article>' +
+      '<script type="application/json">' + JSON.stringify({ require: [[{ result: { media: instagramPost } }]] }) + '</script>',
+  }));
+  let instagramAudioMissing = false;
+  await videoPage.route('https://www.instagram.com/api/v1/media/*/info/', route => route.fulfill({
+    contentType: 'application/json',
+    body: JSON.stringify({ items: [{ ...instagramPost,
+      video_versions: [{ url: origin + (instagramAudioMissing ? '/silent.mp4' : '/instagram-complete.mp4'), width: 160, height: 90 }],
+    }] }),
+  }));
+  await videoPage.goto(instagram);
+  await videoPage.bringToFront();
+  await status(reopenedJobs, '#state', '识别到 1 个');
+  const instagramJob = await start(reopenedJobs, /Instagram 完整视频测试.*完整文件/);
+  await status(reopenedJobs, instagramJob + ' .job-message', '已保存');
+  const instagramSaved = (await files()).find(item => item.filename === path.join(changedDirectory, 'Instagram 完整视频测试.mp4'));
+  assert.ok(instagramSaved);
+  verify(instagramSaved.filename, 6);
+  const instagramCompleteCount = (await files()).length;
+  instagramAudioMissing = true;
+  const incompleteInstagram = await start(reopenedJobs, /Instagram 完整视频测试.*完整文件/);
+  await status(reopenedJobs, incompleteInstagram + ' .job-message', '缺少配套音轨');
+  assert.equal((await files()).length, instagramCompleteCount, 'Instagram saved a video track without its declared audio');
+
+  const rightClickPost = {
+    code: 'BA', pk: '2', has_audio: true, caption: { text: 'Instagram 右键目标' },
+    video_versions: [{ url: origin + '/instagram-complete.mp4?selected=two', width: 160, height: 90 }],
+  };
+  await videoPage.route('https://www.instagram.com/api/v1/media/64/info/', route => route.fulfill({
+    contentType: 'application/json', body: JSON.stringify({ items: [rightClickPost] }),
+  }));
+  await videoPage.evaluate(item => {
+    const article = document.createElement('article');
+    article.id = 'context-post';
+    article.style.position = 'relative';
+    article.innerHTML = '<a href="/p/BA/">第二条帖子</a><video width="160" height="90"></video>' +
+      '<span id="context-cover" style="position:absolute;left:0;top:0;width:120px;height:40px">视频遮罩</span>';
+    const script = document.createElement('script');
+    script.type = 'application/json';
+    script.textContent = JSON.stringify({ media: item });
+    document.body.append(article, script);
+  }, rightClickPost);
+  await videoPage.locator('#context-post video').scrollIntoViewIfNeeded();
+  const instagramContext = await capturedContext('#context-cover');
+  assert.equal(instagramContext.target.code, 'BA');
+  const contextJob = await startContext(reopenedJobs, instagramContext);
+  await status(reopenedJobs, contextJob + ' .job-message', '已保存');
+  const selectedSaved = (await files()).find(item => item.filename === path.join(changedDirectory, 'Instagram 右键目标.mp4'));
+  assert.ok(selectedSaved, 'right-click did not download the selected post');
+  verify(selectedSaved.filename, 6);
+  // A recycled post element must not reuse a capture made for the old post.
+  const coverBox = await videoPage.locator('#context-cover').boundingBox();
+  await videoPage.locator('#context-cover').dispatchEvent('contextmenu', {
+    clientX: coverBox.x + 5, clientY: coverBox.y + 5, bubbles: true, composed: true,
+  });
+  await videoPage.locator('#context-post a').evaluate(link => { link.href = '/p/ChangedPost/'; });
+  const staleContext = await worker.evaluate(async url => {
+    const [tab] = await chrome.tabs.query({ url });
+    return chrome.tabs.sendMessage(tab.id, { type: 'get-video-context' }, { frameId: 0 });
+  }, videoPage.url());
+  assert.equal(staleContext.target, undefined);
+  assert.match(staleContext.error, /已变化/);
+  await videoPage.evaluate(() => {
+    history.pushState(null, '', '/reel/OtherPost/');
+    document.querySelector('article').remove();
+  });
+  await status(reopenedJobs, '#state', '请播放当前 Instagram');
+  assert.equal(await reopenedJobs.locator('.media').count(), 0, 'old Instagram metadata survived a post switch');
+  console.log('Instagram 信息流识别、点击刷新源、完整双轨保存及切帖隔离通过。');
+  console.log('X 和 Instagram 右键目标匹配、遮罩选择及失效目标拒绝通过。');
 
 } finally {
   await browser?.close();

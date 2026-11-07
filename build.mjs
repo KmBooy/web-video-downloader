@@ -25,14 +25,18 @@ await build({
     name: 'standalone-scanner',
     setup(build) {
       build.onLoad({ filter: /\/scan-page\.js$/ }, () => ({
-        contents: 'export function scanPage(resourceSince, downloadPostId) {\n' +
-          scanner.outputFiles[0].text + '\nreturn pageScanner.scanPage(resourceSince, downloadPostId);\n}',
+        contents: 'export function scanPage(resourceSince, downloadPostId, contextTarget) {\n' +
+          scanner.outputFiles[0].text + '\nreturn pageScanner.scanPage(resourceSince, downloadPostId, contextTarget);\n}',
         loader: 'js',
       }));
     },
   }],
 });
-for (const asset of ['manifest.json', 'popup.html', 'download.html', 'options.html', 'style.css', 'player-events.js', 'icons']) {
+await build({
+  entryPoints: ['src/player-events.js'], outdir: 'dist', bundle: true, format: 'iife',
+  target: 'chrome120', minify: true, legalComments: 'linked',
+});
+for (const asset of ['manifest.json', 'popup.html', 'download.html', 'options.html', 'style.css', 'icons']) {
   await cp('src/' + asset, 'dist/' + asset, { recursive: true });
 }
 

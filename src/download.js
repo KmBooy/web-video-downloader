@@ -191,7 +191,12 @@ async function writeVideo(job, signal) {
         const source = await selectDouyinSource(direct, job.id, signal, maxHeight);
         direct = { ...direct, url: source.url };
         needsReferer = source.needsReferer;
-      } else await checkDirect(direct.url, signal, maxHeight);
+      } else {
+        const hasAudio = await checkDirect(direct.url, signal, maxHeight);
+        if (job.candidate.requiresAudio && !hasAudio) {
+          throw new Error('这个 Instagram 地址缺少配套音轨，请播放后重新扫描。');
+        }
+      }
     } else {
       mux = await prepareMux({ ...choice, stageWithoutRanges: platform?.stageWithoutRanges }, signal, report, job.id, maxHeight);
     }

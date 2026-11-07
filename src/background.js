@@ -4,6 +4,8 @@ import { bilibiliDownload } from './platforms/bilibili.js';
 import { douyinDownload } from './platforms/douyin.js';
 import { carryXEntries, xCandidates } from './platforms/x.js';
 import { matchesYouTubePlayback, playbackKey, readYouTubePlayback, rememberYouTubePlayback } from './platforms/youtube-session.js';
+import { contextCandidate } from './context-target.js';
+import { installContextMenu } from './context-menu.js';
 
 const tabKey = id => 'tab:' + id;
 const jobsKey = 'download-jobs';
@@ -124,6 +126,11 @@ chrome.webRequest.onBeforeRequest.addListener(details => {
 }, { urls: ['https://*.googlevideo.com/videoplayback*'] }, ['requestBody']);
 
 function addSnapshot(snapshot, frameId) {
+  if (snapshot.site === 'instagram') {
+    return (snapshot.instagramVideos ?? []).map(item => ({
+      ...item, files: item.files.map(file => ({ ...file, url: mediaUrl(file.url) })).filter(file => file.url),
+    })).filter(item => item.files.length);
+  }
   const entries = [];
   const items = snapshot.site === 'youtube' ? [] : [
     ...(snapshot.videos ?? []).map(video => ({ ...video, player: true })), ...(snapshot.resources ?? []),
@@ -152,7 +159,7 @@ function addSnapshot(snapshot, frameId) {
   return entries;
 }
 
-async function scan(tabId, downloadPostId = null, forDownload = false) {
+async function scan(tabId, downloadPostId = null, forDownload = false, contextTarget = null) {
   const frame = await chrome.webNavigation.getFrame({ tabId, frameId: 0 });
   const page = pageKey(frame?.url);
   if (!page) throw new Error('打开一个 HTTP 或 HTTPS 视频网页后再扫描。');
@@ -164,7 +171,7 @@ async function scan(tabId, downloadPostId = null, forDownload = false) {
     return next;
   });
   const frames = await chrome.scripting.executeScript({
-    target: { tabId, allFrames: true }, world: 'MAIN', func: scanPage, args: [capture.resourceSince, downloadPostId],
+    target: { tabId, allFrames: true }, world: 'MAIN', func: scanPage, args: [capture.resourceSince, downloadPostId, contextTarget],
   });
   return serialize(tabId, async () => {
     const current = await chrome.webNavigation.getFrame({ tabId, frameId: 0 });
@@ -201,6 +208,7 @@ async function scan(tabId, downloadPostId = null, forDownload = false) {
       }
       entries = combineCandidates(state.entries, snapshots);
       if (top.site === 'x') entries = xCandidates(entries, top, state.xEntries);
+      else if (top.site === 'instagram') entries = snapshots.filter(entry => entry.site === 'instagram');
       else if (state.douyin?.postId && state.douyin.postId === top.douyinPost) entries = [state.douyin];
     }
     const named = titleCandidates(entries, top.title);
@@ -280,27 +288,32 @@ async function reconcileJobs() {
 }
 
 async function startJob(message) {
-  const douyinPost = message.selection?.match(/^douyin-video:\d+:files:(\d+)$/)?.[1];
-  const snapshot = await scan(message.tabId, douyinPost, true);
-  const candidate = snapshot.entries.find(entry => (entry.id ?? entry.url) === message.selection);
+  const target = message.contextTarget;
+  const postId = target?.code ?? message.selection?.match(/^douyin-video:\d+:files:(\d+)$/)?.[1]
+    ?? message.selection?.match(/^instagram:([\w-]+):/)?.[1];
+  const snapshot = await scan(message.tabId, postId, true, target);
+  const candidate = target ? contextCandidate(snapshot.entries, target)
+    : snapshot.entries.find(entry => (entry.id ?? entry.url) === message.selection);
+  const selection = candidate?.id ?? candidate?.url;
   return serialize(jobLock, async () => {
     const state = await tabState(message.tabId);
-    if (snapshot.page !== message.page || snapshot.epoch !== message.epoch || state?.epoch !== snapshot.epoch) {
+    if (snapshot.page !== (target?.page ?? message.page) || (!target && snapshot.epoch !== message.epoch)
+        || state?.epoch !== snapshot.epoch) {
       throw new Error('页面已切换，请重新扫描。');
     }
     if (!candidate || candidate.kind === 'fragment') throw new Error('媒体地址已变化，请播放后重新扫描。');
     await reconcileJobs();
     const active = (await getJobs()).filter(isActiveJob);
     if (active.some(job => job.tabId === message.tabId && job.page === snapshot.page
-        && job.selection === message.selection)) {
+        && job.selection === selection)) {
       throw new Error('这个视频已经在下载。');
     }
     if (active.length >= maxActiveJobs) throw new Error('最多同时下载 ' + maxActiveJobs + ' 个视频，请等一个完成后再试。');
 
     const id = crypto.randomUUID();
-    const title = cleanTitle(message.title) || candidate.title;
+    const title = (target ? '' : cleanTitle(message.title)) || candidate.title;
     const status = { id, title, tabId: message.tabId, page: snapshot.page, site: candidate.site,
-      selection: message.selection, state: 'queued', message: '正在启动后台下载…' };
+      selection, state: 'queued', message: '正在启动后台下载…' };
     await setJob(status);
     try {
       if (!await workerExists()) {
@@ -311,13 +324,15 @@ async function startJob(message) {
       }
       const response = await chrome.runtime.sendMessage({ type: 'run-download', job: { id, title, candidate } });
       if (!response?.accepted) throw new Error('后台下载未能启动，请重试。');
-      return { id };
+      return { id, title };
     } catch (error) {
       await finishJob(status, { state: 'failed', message: error.message });
       throw error;
     }
   });
 }
+
+installContextMenu(startJob);
 
 async function cancelJob(id) {
   await reconcileJobs();
