@@ -382,7 +382,8 @@ async function handleWorkerMessage(message) {
   } else if (message.type === 'download-native-cancel') {
     if (job.nativeDownloadId != null) await chrome.downloads.cancel(job.nativeDownloadId).catch(() => {});
   } else if (message.type === 'download-referer') {
-    const platform = job.site === 'bilibili' ? bilibiliDownload : job.site === 'douyin-video' ? douyinDownload : undefined;
+    const platform = job.site === 'bilibili' ? bilibiliDownload
+      : ['douyin-video', 'douyin-replay'].includes(job.site) ? douyinDownload : undefined;
     if (!platform || !message.urls.length || message.urls.some(url => !mediaUrl(url) || platform.accepts?.(url) === false)) {
       throw new Error('此媒体地址无法使用站点来源设置。');
     }

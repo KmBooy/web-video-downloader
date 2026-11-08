@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "网页视频下载器",
   "description": "识别当前标签页的完整视频、HLS 和 DASH，并在浏览器内保存。",
-  "version": "0.2.20",
+  "version": "0.2.22",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAljEG9eoC/7efdb4AFr0q4gGTmMdCJ5x03c6D4/BPASXSELUFM59pnpaDlrcDB/QFAVr443GdsBiy1jFvhL3jn/F+aqOqTtrTUyqMPcs5tmBtryn4K79evCtd0nOJFhKqFAAF9oBPDPraBjAchLOmH727hYi+IVLJZrV4KRmdB0d/bsshVKYxmXZAcZxtAOoHnQZT+Zh96yINVhNptpnjt0UCZb9ZfzHA83RKDFHfPzndDSdZjYyga7sHRYXCJXATqE75m+uNEm3SmLfTnncVLUjySabJ9oj2AfEO56D80cWJ0OpVL0ZFN9tWMZq3ggm7SCspCbZ0GWQbjHbxCHRs6wIDAQAB",
   "minimum_chrome_version": "120",
   "permissions": ["contextMenus", "activeTab", "scripting", "storage", "webRequest", "webNavigation", "offscreen", "downloads", "declarativeNetRequestWithHostAccess"],

@@ -7,13 +7,13 @@ const video = cdn + 'v/media-video-avc1/?mime_type=video_mp4&br=1160';
 const audio = cdn + 'a/media-audio-und-mp4a/?mime_type=video_mp4&br=127';
 const complete = cdn + 'complete/?mime_type=video_mp4&br=840';
 
-function scan(path, entries, since = 0, currentSrc = 'blob:https://www.douyin.com/demo', players = []) {
+function scan(path, entries, since = 0, currentSrc = 'blob:https://www.douyin.com/demo', players = [], height = 720) {
   const result = {};
   scanDouyin({
     url: new URL(path, 'https://www.douyin.com'),
     resourceSince: since,
     players,
-    videos: [{ url: currentSrc, height: 720, duration: 7336 }],
+    videos: [{ url: currentSrc, height, duration: 7336 }],
     recent: entries.filter(([, time]) => 100 + time >= since)
       .map(([name]) => ({ name, contentType: 'video/mp4' })),
     result,
@@ -33,6 +33,46 @@ test('pairs the two distinct Douyin replay tracks without turning a preview into
 test('ignores old replay tracks after a same-document switch', async () => {
   const result = await scan('/vsdetail/456', [[video, 2], [audio, 10]], 105);
   assert.equal(result.variants, undefined);
+  assert.match(result.hint, /再扫描/);
+});
+
+function replayPlayer(episodeId, withAudio = true) {
+  return { parentElement: {
+    '__reactFiber$test': { return: { memoizedProps: { awemeInfo: {
+      episodeId,
+      dashOpts: { dynamic_video: {
+        dynamic_video_list: [{ main_url: video.replace('/v/', '/selected-v/'), vwidth: 720, vheight: 1280, bitrate: 2000000 }],
+        dynamic_audio_list: withAudio ? [{ main_url: audio.replace('/a/', '/selected-a/'), avg_bitrate: 129000 }] : [],
+      } },
+    } } } },
+  } };
+}
+
+test('reads tracks bound to the current replay even when resource timings were lost', () => {
+  const result = scan('/vsdetail/456', [], 105, undefined, [replayPlayer('456')], 1280);
+  assert.equal(result.site, 'douyin-replay');
+  assert.deepEqual(result.variants, [{ url: video.replace('/v/', '/selected-v/'), height: 720, bitrate: 2000000 }]);
+  assert.equal(result.audio[0].url, audio.replace('/a/', '/selected-a/'));
+  assert.equal(result.duration, 7336);
+});
+
+test('the selected replay player takes precedence over another replay in resource timings', () => {
+  const result = scan('/vsdetail/456', [[video, 10], [audio, 11]], 105, undefined,
+    [replayPlayer('123'), replayPlayer('456')]);
+  assert.equal(result.variants[0].url, video.replace('/v/', '/selected-v/'));
+  assert.equal(result.audio[0].url, audio.replace('/a/', '/selected-a/'));
+});
+
+test('a previous replay player cannot supply tracks after switching the page ID', () => {
+  const result = scan('/vsdetail/456', [[video, 1], [audio, 2]], 105, undefined, [replayPlayer('123')]);
+  assert.equal(result.variants, undefined);
+  assert.equal(result.audio, undefined);
+});
+
+test('does not fill a missing current replay audio track from another replay', () => {
+  const result = scan('/vsdetail/456', [[video, 10], [audio, 11]], 105, undefined, [replayPlayer('456', false)]);
+  assert.equal(result.variants, undefined);
+  assert.equal(result.audio, undefined);
   assert.match(result.hint, /再扫描/);
 });
 

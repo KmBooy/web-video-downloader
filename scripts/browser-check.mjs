@@ -3,6 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { createReadStream } from 'node:fs';
 import { cp, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
+import { createServer as createHttpsServer } from 'node:https';
 import os from 'node:os';
 import path from 'node:path';
 import { chromium } from 'playwright';
@@ -15,6 +16,10 @@ const dist = path.join(scratch, 'dist');
 const ffmpeg = args => execFileSync('ffmpeg', ['-nostdin', '-loglevel', 'error', '-y', ...args], { stdio: 'inherit' });
 let browser;
 let server;
+let replayTls;
+let replayGate;
+let releaseReplay;
+let replayBytes = 0;
 const longXTitle = 'X 第一条，' + '👩‍💻内容与标点，'.repeat(5) + '结尾';
 const reads = new Set();
 const biliVideoRequests = new Set();
@@ -48,6 +53,12 @@ try {
   ffmpeg(['-i', input, '-an', '-c', 'copy', '-movflags', '+faststart', path.join(media, 'silent.mp4')]);
   ffmpeg(['-i', input, '-an', '-c', 'copy', path.join(media, 'replay-video.mp4')]);
   ffmpeg(['-i', input, '-vn', '-c', 'copy', path.join(media, 'replay-audio.mp4')]);
+  await cp(path.join(media, 'replay-video.mp4'), path.join(media, 'douyin-video.mp4'));
+  await cp(path.join(media, 'replay-audio.mp4'), path.join(media, 'douyin-audio.mp4'));
+  for (const [flag, name] of [['-an', 'video'], ['-vn', 'audio']]) {
+    ffmpeg(['-i', path.join(media, 'replay.m3u8'), flag, '-c', 'copy', '-movflags', '+faststart',
+      path.join(media, 'douyin-long-' + name + '.mp4')]);
+  }
   const hls = ['-c', 'copy', '-f', 'hls', '-hls_time', '2', '-hls_playlist_type', 'vod'];
   ffmpeg(['-i', input, '-an', ...hls, path.join(media, 'split-video.m3u8')]);
   ffmpeg(['-i', input, '-vn', ...hls, path.join(media, 'split-audio.m3u8')]);
@@ -129,7 +140,16 @@ try {
     reads.add(file);
     file.on('close', () => reads.delete(file));
     res.on('close', () => file.destroy());
-    file.pipe(res);
+    if (replayGate && name === 'douyin-long-audio.mp4') {
+      void (async () => {
+        for await (const chunk of file) {
+          if (replayBytes >= 512 * 1024) await replayGate;
+          res.write(chunk);
+          replayBytes += chunk.length;
+        }
+        res.end();
+      })().catch(() => res.destroy());
+    } else file.pipe(res);
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const origin = 'http://127.0.0.1:' + server.address().port;
@@ -144,7 +164,8 @@ try {
     channel: 'chromium', executablePath: process.env.WEB_VIDEO_CHROME || undefined,
     headless: true, acceptDownloads: true, downloadsPath: media,
     args: ['--disable-extensions-except=' + dist, '--load-extension=' + dist, '--no-proxy-server',
-      '--host-resolver-rules=MAP x.com 127.0.0.1, MAP video.twimg.com 127.0.0.1'],
+      '--ignore-certificate-errors',
+      '--host-resolver-rules=MAP x.com 127.0.0.1, MAP video.twimg.com 127.0.0.1, MAP v26-web.douyinvod.com 127.0.0.1'],
   });
   browser = await launch();
   let worker = browser.serviceWorkers()[0] ?? await browser.waitForEvent('serviceworker', { timeout: 10000 });
@@ -493,12 +514,13 @@ try {
   assert.equal(await videoPage.evaluate(() => window.websiteMenuCount), 1, 'Shift-right-click did not retain the website menu');
   const secondX = await startContext(xPopup, xContext);
   await status(xPopup, secondX + ' .job-message', '已保存');
-  assert.equal(await xPopup.locator(firstX).count(), 0, 'previous page job leaked into current page');
+  assert.equal(await xPopup.locator(firstX).count(), 1, 'running job disappeared after switching pages');
   assert.equal(await jobState(firstX), 'running', 'first X job ended before the second saved');
 
   const biliPage = await browser.newPage();
   await openBili(biliPage);
   const biliJob = await start(xPopup, /B 站分离轨测试.*分离音视频/);
+  await status(xPopup, biliJob + ' .job-message', '已保存');
 
   const note = 'https://www.xiaohongshu.com/explore/abc123';
   await videoPage.route(note, route => route.fulfill({
@@ -513,21 +535,34 @@ try {
   await videoPage.bringToFront();
   const noteJob = await start(xPopup, /小红书视频.*完整文件/);
   await status(xPopup, noteJob + ' .job-message', '已保存');
-  assert.equal(await xPopup.locator(biliJob).count(), 0, 'another tab job leaked into current page');
+  await xPopup.locator(biliJob).waitFor({ state: 'detached' });
+  assert.equal(await xPopup.locator(secondX).count(), 0, 'completed X job leaked into another page');
+  assert.equal(await xPopup.locator(firstX).count(), 1, 'running job disappeared in another tab');
   await biliPage.close();
 
   await videoPage.goto(origin + '/page?mode=replay.m3u8');
   const discard = await start(xPopup, /Fixture replay.m3u8.*HLS 清单/);
   await status(xPopup, discard + ' .job-message', '合并音视频');
+  const blank = await browser.newPage();
+  await blank.goto('about:blank');
+  await status(xPopup, '#state', '打开一个 HTTP');
+  assert.equal(await xPopup.locator(firstX).count(), 1, 'running job disappeared on a new blank page');
+  assert.equal(await xPopup.locator(discard).count(), 1, 'foreign running job cannot be cancelled from a blank page');
   await xPopup.locator(discard + ' button').click();
-  await status(xPopup, discard + ' .job-message', '已取消');
+  await xPopup.locator(discard).waitFor({ state: 'detached' });
+  assert.equal(await jobState(discard), 'cancelled');
+  await blank.close();
   assert.equal(await jobState(firstX), 'running', 'cancel also stopped the first X job');
   await xPopup.close();
   const reopenedJobs = await browser.newPage();
-  await videoPage.goto(xPost + '111');
+  await videoPage.goto(origin + '/page?mode=missing');
   await videoPage.bringToFront();
   await reopenedJobs.goto(prefix + 'popup.html');
-  await status(reopenedJobs, firstX + ' .job-message', '已保存', 120000);
+  await reopenedJobs.locator(firstX).waitFor();
+  await reopenedJobs.locator(firstX).waitFor({ state: 'detached', timeout: 120000 });
+  assert.equal(await jobState(firstX), 'saved');
+  await videoPage.goto(xPost + '111');
+  await status(reopenedJobs, firstX + ' .job-message', '已保存');
   const completed = await files();
   for (const [name, seconds, audio] of [
     [longXTitle.replaceAll('\u200d', '') + '.mp4', 720, true], ['X 第二条.mp4', 6, false],
@@ -619,8 +654,85 @@ try {
   console.log('Instagram 信息流识别、点击刷新源、完整双轨保存及切帖隔离通过。');
   console.log('X 和 Instagram 右键目标匹配、遮罩选择及失效目标拒绝通过。');
 
+  // The replay player can load before an SPA navigation, and its resource
+  // timing buffer may no longer contain its tracks. Read the selected player.
+  // Offscreen extension fetches bypass Playwright routing. Serve the fixture
+  // CDN over local HTTPS; its hostname is mapped only in this isolated browser.
+  execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1',
+    '-subj', '/CN=v26-web.douyinvod.com', '-keyout', path.join(scratch, 'key.pem'),
+    '-out', path.join(scratch, 'cert.pem')], { stdio: 'ignore' });
+  replayTls = createHttpsServer({ key: await readFile(path.join(scratch, 'key.pem')),
+    cert: await readFile(path.join(scratch, 'cert.pem')) }, (req, res) => {
+    if (req.headers.referer !== 'https://www.douyin.com/') { res.writeHead(403).end(); return; }
+    const kind = req.url.includes('media-video-') ? 'video' : 'audio';
+    req.url = '/douyin-' + (req.url.includes('/long/') ? 'long-' : '') + kind + '.mp4';
+    server.emit('request', req, res);
+  });
+  await new Promise(resolve => replayTls.listen(0, '127.0.0.1', resolve));
+  const douyinCdn = 'https://v26-web.douyinvod.com:' + replayTls.address().port + '/sign/video/tos/cn/';
+  await videoPage.route('https://www.douyin.com/vsdetail/**', route => route.fulfill({
+    contentType: 'text/html; charset=utf-8', body: '<title>抖音回放测试</title><div><video controls></video></div>',
+  }));
+  await videoPage.goto('https://www.douyin.com/vsdetail/450');
+  async function selectReplay(episodeId, long = false) {
+    const source = (await readFile(path.join(media, long ? 'douyin-long-video.mp4' : 'douyin-video.mp4'))).toString('base64');
+    await videoPage.evaluate(({ source, cdn, episodeId }) => {
+      const video = document.querySelector('video');
+      video.src = URL.createObjectURL(new Blob([Uint8Array.from(atob(source), c => c.charCodeAt(0))], { type: 'video/mp4' }));
+      video.parentElement.__reactFiber$fixture = { return: { memoizedProps: { awemeInfo: {
+        episodeId, dashOpts: { dynamic_video: {
+          dynamic_video_list: [{ main_url: cdn + 'v/media-video-avc1/?mime_type=video_mp4', vwidth: 160, vheight: 90 }],
+          dynamic_audio_list: [{ main_url: cdn + 'a/media-audio-und-mp4a/?mime_type=video_mp4' }],
+        } },
+      } } } };
+      document.title = '抖音回放测试 ' + episodeId;
+      performance.clearResourceTimings();
+      history.pushState(null, '', '/vsdetail/' + episodeId);
+    }, { source, cdn: douyinCdn + (long ? 'long/' : ''), episodeId });
+    await videoPage.waitForFunction(long => {
+      const duration = document.querySelector('video').duration;
+      return long ? duration > 700 : duration > 5 && duration < 7;
+    }, long);
+    await reopenedJobs.getByRole('button', { name: new RegExp('抖音回放测试 ' + episodeId + '.*直播回放') }).waitFor();
+  }
+  replayGate = new Promise(resolve => { releaseReplay = resolve; });
+  await selectReplay('456', true);
+  const firstReplay = await start(reopenedJobs, /直播回放 · 合并音视频/);
+  await status(reopenedJobs, firstReplay + ' .job-message', '正在保存音视频');
+  await selectReplay('457');
+  assert.equal(await reopenedJobs.locator(firstReplay).count(), 1, 'running replay disappeared on the next page');
+  const secondReplay = await start(reopenedJobs, /直播回放 · 合并音视频/);
+  await status(reopenedJobs, secondReplay + ' .job-message', '已保存');
+  assert.equal(await jobState(firstReplay), 'running', 'the second replay stopped the first');
+  const rules = await worker.evaluate(() => chrome.declarativeNetRequest.getSessionRules());
+  assert.equal(rules.length, 2, 'finishing the second replay removed the first replay referrer rules');
+  await videoPage.evaluate(() => {
+    performance.clearResourceTimings();
+    history.pushState(null, '', '/vsdetail/458');
+  });
+  await status(reopenedJobs, '#state', '抖音回放的音视频分开加载');
+  assert.equal(await reopenedJobs.locator('.media').count(), 0, 'the previous replay survived an episode switch');
+  assert.equal(await reopenedJobs.locator(secondReplay).count(), 0, 'completed replay leaked into another page');
+  assert.equal(await reopenedJobs.locator(firstReplay).count(), 1);
+  releaseReplay();
+  await reopenedJobs.locator(firstReplay).waitFor({ state: 'detached', timeout: 120000 });
+  assert.equal(await jobState(firstReplay), 'saved');
+  await videoPage.evaluate(() => history.pushState(null, '', '/vsdetail/456'));
+  await status(reopenedJobs, firstReplay + ' .job-message', '已保存');
+  for (const [id, seconds] of [['456', 720], ['457', 6]]) {
+    const saved = (await files()).find(item => path.basename(item.filename) === '抖音回放测试 ' + id + '.mp4');
+    assert.ok(saved, 'missing saved replay ' + id);
+    verify(saved.filename, seconds);
+  }
+  console.log('两场抖音回放跨页并行、来源设置互不清除、完整双轨保存及全局进行中/本页已结束显示通过。');
+
 } finally {
+  releaseReplay?.();
   await browser?.close();
+  if (replayTls) {
+    replayTls.closeAllConnections();
+    await new Promise(resolve => replayTls.close(resolve));
+  }
   if (server) {
     const closed = Array.from(reads, file => new Promise(resolve => {
       file.once('close', resolve);

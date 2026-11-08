@@ -27,8 +27,9 @@ function displayTitle(name) {
 }
 
 function syncJobs() {
-  const pageJobs = jobs.filter(job => job.tabId === currentTab && job.page === currentPage);
-  const activeSelections = new Set(pageJobs.filter(isActive).map(job => job.selection));
+  const belongsHere = job => job.tabId === currentTab && job.page === currentPage;
+  const pageJobs = jobs.filter(job => isActive(job) || belongsHere(job));
+  const activeSelections = new Set(jobs.filter(job => isActive(job) && belongsHere(job)).map(job => job.selection));
   for (const button of $('media').children) {
     button.disabled = activeSelections.has(button.dataset.selection)
       || starting.has(selectionKey(currentTab, currentPage, button.dataset.selection));

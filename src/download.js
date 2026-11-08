@@ -167,7 +167,8 @@ async function writeVideo(job, signal) {
   report('正在识别画质和媒体轨…');
   const youtube = job.candidate.kind === 'youtube-sabr';
   let choice = youtube ? undefined : await choose(job.candidate, maxHeight, signal);
-  const platform = job.candidate.site === 'bilibili' ? bilibiliDownload : undefined;
+  const platform = job.candidate.site === 'bilibili' ? bilibiliDownload
+    : job.candidate.site === 'douyin-replay' ? douyinDownload : undefined;
   let needsReferer = Boolean(platform?.referer);
   if (needsReferer) await useSiteReferer(job.id, [choice.direct?.url, choice.video?.url, choice.audio?.url].filter(Boolean));
 

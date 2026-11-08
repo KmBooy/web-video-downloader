@@ -14,7 +14,7 @@ npm test
 npm run build
 ```
 
-浏览器回归测试需要 Playwright Chromium、FFmpeg 和 ffprobe。在 macOS 或 Linux 上可按下面的方式运行：
+浏览器回归测试需要 Playwright Chromium、FFmpeg / ffprobe 和 OpenSSL。在 macOS 或 Linux 上可按下面的方式运行：
 
 ```sh
 npx playwright install chromium

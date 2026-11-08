@@ -1,6 +1,6 @@
 {
   "name": "web-video-downloader",
-  "version": "0.2.20",
+  "version": "0.2.22",
   "private": true,
   "type": "module",
   "scripts": {

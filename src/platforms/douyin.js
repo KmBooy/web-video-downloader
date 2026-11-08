@@ -25,6 +25,30 @@ function currentFeedItem(container, postId) {
   }
 }
 
+function replaySources(players, episodeId) {
+  for (const player of players) {
+    for (let node = player, parents = 0; node && parents < 4; node = node.parentElement, parents++) {
+      const key = Object.keys(node).find(key => key.startsWith('__reactFiber$'));
+      if (!key) continue;
+      for (let fiber = node[key], depth = 0; fiber && depth < 16; fiber = fiber.return, depth++) {
+        const item = fiber.memoizedProps?.awemeInfo;
+        const media = item?.episodeId === episodeId && item.dashOpts?.dynamic_video;
+        if (!media) continue;
+        // The player owns this episode's tracks. Resource timings can be full
+        // or still contain another replay after an in-page navigation.
+        return [media.dynamic_video_list, media.dynamic_audio_list].flatMap(list =>
+          (Array.isArray(list) ? list : []).flatMap(track =>
+            [track.backup_url, track.main_url].flat().filter(url => typeof url === 'string' && url).map(name => ({
+              name, contentType: 'video/mp4',
+              height: Math.min(track.vwidth, track.vheight) || undefined,
+              bitrate: Number(track.bitrate || track.avg_bitrate) || 0,
+            }))));
+      }
+      break;
+    }
+  }
+}
+
 function completeFiles(sources) {
   const files = new Map();
   for (const source of sources) {
@@ -102,7 +126,7 @@ export async function refreshDouyinFiles(result, postId, page) {
 }
 
 export function scanDouyin({ url, players = [], videos, recent, resourceSince, result }) {
-  const replay = /^\/vsdetail\/\d+(?:\/|$)/.test(url.pathname);
+  const replay = url.pathname.match(/^\/vsdetail\/(\d+)(?:\/|$)/)?.[1];
   const detail = url.pathname.match(/^\/(?:m\/)?video\/(\d+)(?:\/|$)/)?.[1];
   const modal = url.searchParams.get('modal_id')?.match(/^\d+$/)?.[0];
   const active = replay ? undefined : players.map(player => player.closest('[data-e2e="feed-active-video"]')).find(Boolean);
@@ -127,8 +151,10 @@ export function scanDouyin({ url, players = [], videos, recent, resourceSince, r
     const directSources = replay ? [] : videos.filter(item => /^https:\/\//.test(item.url)
         && ((!modal && !activeId && !resourceSince) || new URL(item.url).searchParams.get('__vid') === douyinPost))
       .map(item => ({ name: item.url, height: item.height }));
-    for (const entry of [...recent, ...directSources]) {
-      const media = new URL(entry.name, url);
+    const sources = replay ? replaySources(players, replay) : undefined;
+    for (const entry of sources ?? [...recent, ...directSources]) {
+      let media;
+      try { media = new URL(entry.name, url); } catch { continue; }
       if (!replay && (modal || activeId) && media.searchParams.get('__vid') !== douyinPost) continue;
       const mp4 = media.searchParams.get('mime_type') === 'video_mp4'
         || entry.contentType?.split(';')[0] === 'video/mp4';
@@ -141,12 +167,12 @@ export function scanDouyin({ url, players = [], videos, recent, resourceSince, r
       variants.set(key, {
         url: media.href,
         height: entry.height || variants.get(key)?.height,
-        bitrate: (Number(media.searchParams.get('br')) || 0) * 1000,
+        bitrate: entry.bitrate || (Number(media.searchParams.get('br')) || 0) * 1000,
       });
     }
     if (replay && tracks.video.size && tracks.audio.size) {
       result.variants = [...tracks.video.values()];
-      if (result.variants.length === 1) result.variants[0].height = playback?.height;
+      if (result.variants.length === 1) result.variants[0].height ??= playback?.height;
       result.audio = [...tracks.audio.values()];
       result.duration = playback?.duration;
       result.site = 'douyin-replay';
